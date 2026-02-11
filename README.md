@@ -14,7 +14,8 @@ This app supports:
 - a numeric channel keypad overlay
 
 ## What it does
-
+<img width="1206" height="2622" alt="simulator_screenshot_5A27874F-A12E-4507-866B-B760C208EBAF" src="https://github.com/user-attachments/assets/79dcebd3-d9b6-49b6-a379-56fad0d9f61e" />
+<img width="1206" height="2622" alt="simulator_screenshot_9E6D8CEC-6792-4067-9A90-3C02FF3C6561" src="https://github.com/user-attachments/assets/db8a137b-85b9-4eaa-b4b6-e4002ba207d3" />
 This app lets users connect to a TV profile once, then reuse it every time the app opens.
 Users can:
 - scan for TVs on the local network
