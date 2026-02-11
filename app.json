@@ -1,0 +1,18 @@
+{
+  "expo": {
+    "name": "TV Remote",
+    "slug": "tv-remote",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "dark",
+    "ios": {
+      "supportsTablet": false,
+      "infoPlist": {
+        "NSLocalNetworkUsageDescription": "Allow local network access to discover and control TVs on your Wi-Fi."
+      }
+    },
+    "web": {
+      "bundler": "metro"
+    }
+  }
+}
