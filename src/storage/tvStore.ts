@@ -89,6 +89,23 @@ export async function upsertTVProfile(tv: SavedTV): Promise<TVStoreState> {
   return nextState;
 }
 
+export async function updateTVProfile(
+  profileId: string,
+  patch: Partial<Omit<SavedTV, "id">>
+): Promise<TVStoreState> {
+  const state = await loadTVState();
+  const nextProfiles = state.profiles.map((profile) =>
+    profile.id === profileId ? { ...profile, ...patch } : profile
+  );
+
+  const nextState: TVStoreState = {
+    profiles: nextProfiles,
+    activeTVId: state.activeTVId,
+  };
+  await saveTVState(nextState);
+  return nextState;
+}
+
 export async function setActiveTVProfile(profileId: string): Promise<TVStoreState> {
   const state = await loadTVState();
   const exists = state.profiles.some((profile) => profile.id === profileId);

@@ -8,7 +8,10 @@
     "ios": {
       "supportsTablet": false,
       "infoPlist": {
-        "NSLocalNetworkUsageDescription": "Allow local network access to discover and control TVs on your Wi-Fi."
+        "NSLocalNetworkUsageDescription": "Allow local network access to discover and control TVs on your Wi-Fi.",
+        "NSAppTransportSecurity": {
+          "NSAllowsLocalNetworking": true
+        }
       }
     },
     "web": {

@@ -10,6 +10,7 @@ import {
   deleteTVProfile,
   loadTVState,
   setActiveTVProfile,
+  updateTVProfile,
   upsertTVProfile,
 } from "./src/storage/tvStore";
 import { palette } from "./src/theme";
@@ -72,6 +73,12 @@ export default function App() {
     setMode("profiles");
   }
 
+  async function handleRenameProfile(profileId: string, nickname: string) {
+    const state = await updateTVProfile(profileId, { nickname });
+    setProfiles(state.profiles);
+    setActiveTVId(state.activeTVId);
+  }
+
   function handleAddNewProfile() {
     setMode("onboarding");
   }
@@ -113,6 +120,7 @@ export default function App() {
           activeTVId={activeTVId}
           onSelect={handleSelectProfile}
           onDelete={handleDeleteProfile}
+          onRename={handleRenameProfile}
           onAddNew={handleAddNewProfile}
           onBackToRemote={activeTV ? handleBackToRemote : undefined}
         />
@@ -124,6 +132,7 @@ export default function App() {
           activeTVId={activeTVId}
           onSelect={handleSelectProfile}
           onDelete={handleDeleteProfile}
+          onRename={handleRenameProfile}
           onAddNew={handleAddNewProfile}
         />
       )}

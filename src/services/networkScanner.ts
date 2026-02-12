@@ -1,3 +1,4 @@
+import * as Network from "expo-network";
 import { TVBrand } from "../types/tv";
 
 export type DiscoveredTV = {
@@ -9,10 +10,27 @@ export type DiscoveredTV = {
   source: "roku" | "samsung" | "chromecast" | "bridge";
 };
 
-const scanPrefixes = ["192.168.1", "192.168.0", "10.0.0"];
-const hostRangeStart = 2;
-const hostRangeEnd = 60;
-const maxConcurrentHosts = 24;
+export type ScanOptions = {
+  prefixes?: string[];
+  hosts?: string[];
+  hostRangeStart?: number;
+  hostRangeEnd?: number;
+  maxConcurrentHosts?: number;
+  onDiscovered?: (tv: DiscoveredTV) => void;
+  abortSignal?: AbortSignal;
+};
+
+const defaultScanPrefixes = [
+  "192.168.1",
+  "192.168.0",
+  "192.168.50",
+  "10.0.0",
+  "10.0.1",
+  "172.20.10",
+];
+const defaultHostRangeStart = 1;
+const defaultHostRangeEnd = 254;
+const defaultMaxConcurrentHosts = 28;
 
 function mapBrand(label: string): TVBrand {
   const value = label.toLowerCase();
@@ -24,14 +42,103 @@ function mapBrand(label: string): TVBrand {
   return "other";
 }
 
-async function fetchWithTimeout(url: string, timeoutMs = 380): Promise<Response> {
+function bindAbort(signal: AbortSignal | undefined, onAbort: () => void): () => void {
+  if (!signal) return () => {};
+  if (signal.aborted) {
+    onAbort();
+    return () => {};
+  }
+  signal.addEventListener("abort", onAbort);
+  return () => signal.removeEventListener("abort", onAbort);
+}
+
+async function fetchWithTimeout(
+  url: string,
+  timeoutMs = 450,
+  abortSignal?: AbortSignal
+): Promise<Response> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  const unbindAbort = bindAbort(abortSignal, () => controller.abort());
   try {
     return await fetch(url, { signal: controller.signal });
   } finally {
     clearTimeout(timeout);
+    unbindAbort();
   }
+}
+
+function base64EncodeAscii(value: string): string {
+  const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=";
+  let output = "";
+  let i = 0;
+
+  while (i < value.length) {
+    const c1 = value.charCodeAt(i++);
+    const c2 = value.charCodeAt(i++);
+    const c3 = value.charCodeAt(i++);
+
+    const e1 = c1 >> 2;
+    const e2 = ((c1 & 3) << 4) | (c2 >> 4);
+    const e3 = Number.isNaN(c2) ? 64 : ((c2 & 15) << 2) | (c3 >> 6);
+    const e4 = Number.isNaN(c3) ? 64 : c3 & 63;
+
+    output += chars.charAt(e1) + chars.charAt(e2) + chars.charAt(e3) + chars.charAt(e4);
+  }
+
+  return output;
+}
+
+function canOpenWebSocket(
+  url: string,
+  timeoutMs = 1500,
+  abortSignal?: AbortSignal
+): Promise<boolean> {
+  if (abortSignal?.aborted) return Promise.resolve(false);
+
+  return new Promise((resolve) => {
+    let settled = false;
+    const socket = new WebSocket(url);
+
+    const finish = (result: boolean) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      unbindAbort();
+      resolve(result);
+    };
+
+    const timeout = setTimeout(() => {
+      try {
+        socket.close();
+      } catch {
+        // ignore
+      }
+      finish(false);
+    }, timeoutMs);
+
+    const unbindAbort = bindAbort(abortSignal, () => {
+      try {
+        socket.close();
+      } catch {
+        // ignore
+      }
+      finish(false);
+    });
+
+    socket.onopen = () => {
+      try {
+        socket.close();
+      } catch {
+        // ignore
+      }
+      finish(true);
+    };
+
+    socket.onerror = () => {
+      finish(false);
+    };
+  });
 }
 
 function parseTag(xml: string, tag: string): string | null {
@@ -39,9 +146,10 @@ function parseTag(xml: string, tag: string): string | null {
   return match?.[1]?.trim() ?? null;
 }
 
-async function probeRoku(host: string): Promise<DiscoveredTV | null> {
+async function probeRoku(host: string, abortSignal?: AbortSignal): Promise<DiscoveredTV | null> {
+  if (abortSignal?.aborted) return null;
   try {
-    const response = await fetchWithTimeout(`http://${host}:8060/query/device-info`, 420);
+    const response = await fetchWithTimeout(`http://${host}:8060/query/device-info`, 500, abortSignal);
     if (!response.ok) return null;
     const text = await response.text();
 
@@ -63,34 +171,88 @@ async function probeRoku(host: string): Promise<DiscoveredTV | null> {
   }
 }
 
-async function probeSamsung(host: string): Promise<DiscoveredTV | null> {
+async function probeSamsung(host: string, abortSignal?: AbortSignal): Promise<DiscoveredTV | null> {
+  if (abortSignal?.aborted) return null;
+  const fallbackNickname = `Samsung TV (${host})`;
+
   try {
-    const response = await fetchWithTimeout(`http://${host}:8001/api/v2/`, 420);
-    if (!response.ok) return null;
-    const payload = (await response.json()) as {
-      device?: { name?: string; modelName?: string };
-    };
+    const response = await fetchWithTimeout(`http://${host}:8001/api/v2/`, 1000, abortSignal);
+    const text = await response.text();
+    let deviceName = "";
+    let modelName = "";
 
-    const deviceName = payload.device?.name ?? "";
-    const modelName = payload.device?.modelName ?? "";
-    const merged = `${deviceName} ${modelName} samsung`;
+    try {
+      const payload = JSON.parse(text) as {
+        device?: { name?: string; modelName?: string };
+      };
+      deviceName = payload.device?.name ?? "";
+      modelName = payload.device?.modelName ?? "";
+    } catch {
+      // Some Samsung models return non-JSON bodies; keep probing with heuristics.
+    }
 
+    const payloadFingerprint = text.toLowerCase();
+    const looksSamsungPayload =
+      payloadFingerprint.includes("samsung") ||
+      payloadFingerprint.includes("tizen") ||
+      payloadFingerprint.includes("smarttv");
+    const hasDeviceInfo = deviceName.length > 0 || modelName.length > 0;
+
+    if (hasDeviceInfo || (response.status < 500 && looksSamsungPayload)) {
+      return {
+        id: `samsung-${host}`,
+        brand: "samsung",
+        nickname: deviceName || modelName || fallbackNickname,
+        host,
+        port: 8001,
+        source: "samsung",
+      };
+    }
+  } catch {
+    // Continue with websocket fallback probing.
+  }
+  if (abortSignal?.aborted) return null;
+
+  const appName = base64EncodeAscii("TV Remote Expo");
+  const ws8001 = await canOpenWebSocket(
+    `ws://${host}:8001/api/v2/channels/samsung.remote.control?name=${appName}`,
+    1500,
+    abortSignal
+  );
+  if (ws8001) {
     return {
-      id: `samsung-${host}`,
-      brand: mapBrand(merged),
-      nickname: deviceName || modelName || "Samsung TV",
+      id: `samsung-${host}-ws8001`,
+      brand: "samsung",
+      nickname: fallbackNickname,
       host,
       port: 8001,
       source: "samsung",
     };
-  } catch {
-    return null;
   }
+
+  const ws8002 = await canOpenWebSocket(
+    `wss://${host}:8002/api/v2/channels/samsung.remote.control?name=${appName}`,
+    1500,
+    abortSignal
+  );
+  if (ws8002) {
+    return {
+      id: `samsung-${host}-ws8002`,
+      brand: "samsung",
+      nickname: fallbackNickname,
+      host,
+      port: 8002,
+      source: "samsung",
+    };
+  }
+
+  return null;
 }
 
-async function probeChromecast(host: string): Promise<DiscoveredTV | null> {
+async function probeChromecast(host: string, abortSignal?: AbortSignal): Promise<DiscoveredTV | null> {
+  if (abortSignal?.aborted) return null;
   try {
-    const response = await fetchWithTimeout(`http://${host}:8008/setup/eureka_info`, 420);
+    const response = await fetchWithTimeout(`http://${host}:8008/setup/eureka_info`, 500, abortSignal);
     if (!response.ok) return null;
     const payload = (await response.json()) as {
       name?: string;
@@ -114,9 +276,10 @@ async function probeChromecast(host: string): Promise<DiscoveredTV | null> {
   }
 }
 
-async function probeBridge(host: string): Promise<DiscoveredTV | null> {
+async function probeBridge(host: string, abortSignal?: AbortSignal): Promise<DiscoveredTV | null> {
+  if (abortSignal?.aborted) return null;
   try {
-    const response = await fetchWithTimeout(`http://${host}:8080/remote/ping`, 320);
+    const response = await fetchWithTimeout(`http://${host}:8080/remote/ping`, 360, abortSignal);
     if (!response.ok) return null;
     return {
       id: `bridge-${host}`,
@@ -131,23 +294,112 @@ async function probeBridge(host: string): Promise<DiscoveredTV | null> {
   }
 }
 
-async function probeHost(host: string): Promise<DiscoveredTV | null> {
-  // Prioritize the fastest and most common TV fingerprints.
-  const roku = await probeRoku(host);
-  if (roku) return roku;
+async function probeHost(host: string, abortSignal?: AbortSignal): Promise<DiscoveredTV | null> {
+  if (abortSignal?.aborted) return null;
+  const results = await Promise.all([
+    probeRoku(host, abortSignal),
+    probeSamsung(host, abortSignal),
+    probeChromecast(host, abortSignal),
+    probeBridge(host, abortSignal),
+  ]);
 
-  const samsung = await probeSamsung(host);
-  if (samsung) return samsung;
-
-  const cast = await probeChromecast(host);
-  if (cast) return cast;
-
-  return probeBridge(host);
+  return results.find((item) => Boolean(item)) ?? null;
 }
 
-function buildHosts(): string[] {
+async function probeGenericHost(host: string, abortSignal?: AbortSignal): Promise<DiscoveredTV | null> {
+  if (abortSignal?.aborted) return null;
+  const candidates = [80, 8008, 8001, 8002, 8060, 8080];
+  for (const port of candidates) {
+    if (abortSignal?.aborted) return null;
+    try {
+      const response = await fetchWithTimeout(`http://${host}:${port}/`, 360, abortSignal);
+      // Any reachable HTTP response is enough to present an "unknown TV candidate".
+      if (!response) continue;
+      return {
+        id: `generic-${host}-${port}`,
+        brand: "other",
+        nickname: `Potential TV (${host})`,
+        host,
+        port,
+        source: "bridge",
+      };
+    } catch {
+      // Ignore and continue probing other ports.
+    }
+  }
+  return null;
+}
+
+function isValidPrefix(prefix: string): boolean {
+  const parts = prefix.split(".");
+  if (parts.length !== 3) return false;
+  return parts.every((part) => {
+    if (!/^\d{1,3}$/.test(part)) return false;
+    const value = Number(part);
+    return value >= 0 && value <= 255;
+  });
+}
+
+function extractPrefixFromHost(host: string | null | undefined): string | null {
+  if (!host) return null;
+  const parts = host.split(".");
+  if (parts.length !== 4) return null;
+  const prefix = `${parts[0]}.${parts[1]}.${parts[2]}`;
+  return isValidPrefix(prefix) ? prefix : null;
+}
+
+async function getLocalNetworkPrefix(): Promise<string | null> {
+  try {
+    const ipAddress = await Network.getIpAddressAsync();
+    const prefix = extractPrefixFromHost(ipAddress);
+    if (!prefix) return null;
+    if (prefix === "0.0.0" || prefix.startsWith("127.")) return null;
+    return prefix;
+  } catch {
+    return null;
+  }
+}
+
+async function normalizePrefixes(prefixes?: string[]): Promise<string[]> {
+  if (prefixes !== undefined && prefixes.length === 0) return [];
+  const candidate = prefixes?.map((value) => value.trim()).filter(Boolean) ?? [];
+  const localPrefix = await getLocalNetworkPrefix();
+  const base =
+    candidate.length > 0
+      ? localPrefix
+        ? [localPrefix, ...candidate]
+        : candidate
+      : localPrefix
+        ? [localPrefix, ...defaultScanPrefixes]
+        : defaultScanPrefixes;
+  const valid = base.filter(isValidPrefix);
+  return valid.length > 0 ? [...new Set(valid)] : [...new Set(defaultScanPrefixes)];
+}
+
+function isValidHost(host: string): boolean {
+  const parts = host.split(".");
+  if (parts.length !== 4) return false;
+  return parts.every((part) => {
+    if (!/^\d{1,3}$/.test(part)) return false;
+    const value = Number(part);
+    return value >= 0 && value <= 255;
+  });
+}
+
+function normalizeHosts(hosts?: string[]): string[] {
+  if (!hosts || hosts.length === 0) return [];
+  const candidate = hosts.map((value) => value.trim()).filter(Boolean);
+  const valid = candidate.filter(isValidHost);
+  return [...new Set(valid)];
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, value));
+}
+
+function buildHosts(prefixes: string[], hostRangeStart: number, hostRangeEnd: number): string[] {
   const hosts: string[] = [];
-  for (const prefix of scanPrefixes) {
+  for (const prefix of prefixes) {
     for (let i = hostRangeStart; i <= hostRangeEnd; i += 1) {
       hosts.push(`${prefix}.${i}`);
     }
@@ -155,8 +407,17 @@ function buildHosts(): string[] {
   return hosts;
 }
 
-export async function scanNetworkForTVs(): Promise<DiscoveredTV[]> {
-  const hosts = buildHosts();
+export async function scanNetworkForTVs(options?: ScanOptions): Promise<DiscoveredTV[]> {
+  const prefixes = await normalizePrefixes(options?.prefixes);
+  const explicitHosts = normalizeHosts(options?.hosts);
+  const start = clamp(options?.hostRangeStart ?? defaultHostRangeStart, 1, 254);
+  const end = clamp(options?.hostRangeEnd ?? defaultHostRangeEnd, start, 254);
+  const concurrency = clamp(options?.maxConcurrentHosts ?? defaultMaxConcurrentHosts, 8, 128);
+  const onDiscovered = options?.onDiscovered;
+  const abortSignal = options?.abortSignal;
+
+  const rangedHosts = buildHosts(prefixes, start, end);
+  const hosts = [...new Set([...explicitHosts, ...rangedHosts])];
   const discovered: DiscoveredTV[] = [];
   const seenHosts = new Set<string>();
 
@@ -164,19 +425,37 @@ export async function scanNetworkForTVs(): Promise<DiscoveredTV[]> {
 
   async function worker() {
     while (cursor < hosts.length) {
+      if (abortSignal?.aborted) return;
       const host = hosts[cursor];
       cursor += 1;
       if (!host) continue;
-      const found = await probeHost(host);
-      if (!found) continue;
-      if (seenHosts.has(found.host)) continue;
-      seenHosts.add(found.host);
-      discovered.push(found);
+      const found = await probeHost(host, abortSignal);
+      if (found) {
+        if (!seenHosts.has(found.host)) {
+          seenHosts.add(found.host);
+          console.log(
+            `[networkScanner] Discovered TV payload:\n${JSON.stringify(found, null, 2)}`
+          );
+          discovered.push(found);
+          onDiscovered?.(found);
+        }
+        continue;
+      }
+
+      const generic = await probeGenericHost(host, abortSignal);
+      if (!generic) continue;
+      if (seenHosts.has(generic.host)) continue;
+      seenHosts.add(generic.host);
+      console.log(
+        `[networkScanner] Discovered TV payload:\n${JSON.stringify(generic, null, 2)}`
+      );
+      discovered.push(generic);
+      onDiscovered?.(generic);
     }
   }
 
-  const workers = Array.from({ length: maxConcurrentHosts }, () => worker());
+  const workers = Array.from({ length: concurrency }, () => worker());
   await Promise.all(workers);
 
-  return discovered.sort((a, b) => a.nickname.localeCompare(b.nickname));
+  return discovered;
 }

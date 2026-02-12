@@ -28,6 +28,7 @@ Users can:
 
 - Setup modes
   - `Scan`: discovers TVs on common LAN ranges and lists matches
+    - optional custom subnet prefix input (example: `192.168.50`)
   - `Advanced`: manual setup with brand, nickname, host, and port
 - Saved profiles
   - stores multiple TVs locally with AsyncStorage

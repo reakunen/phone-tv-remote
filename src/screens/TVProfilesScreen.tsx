@@ -1,10 +1,11 @@
-import React from "react";
+import React, { useState } from "react";
 import {
   Alert,
   Pressable,
   ScrollView,
   StyleSheet,
   Text,
+  TextInput,
   View,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
@@ -17,6 +18,7 @@ type Props = {
   activeTVId: string | null;
   onSelect: (profileId: string) => void;
   onDelete: (profileId: string) => void;
+  onRename: (profileId: string, nickname: string) => Promise<void> | void;
   onAddNew: () => void;
   onBackToRemote?: () => void;
 };
@@ -30,14 +32,55 @@ export function TVProfilesScreen({
   activeTVId,
   onSelect,
   onDelete,
+  onRename,
   onAddNew,
   onBackToRemote,
 }: Props) {
+  const [editingProfileId, setEditingProfileId] = useState<string | null>(null);
+  const [editingName, setEditingName] = useState("");
+  const [savingProfileId, setSavingProfileId] = useState<string | null>(null);
+
   function askDelete(tv: SavedTV) {
     Alert.alert("Remove TV profile?", `${tv.nickname} will be removed from saved TVs.`, [
       { text: "Cancel", style: "cancel" },
       { text: "Remove", style: "destructive", onPress: () => onDelete(tv.id) },
     ]);
+  }
+
+  function openProfileMenu(tv: SavedTV) {
+    Alert.alert(tv.nickname, undefined, [
+      { text: "Edit Name", onPress: () => startEdit(tv) },
+      { text: "Remove TV", style: "destructive", onPress: () => askDelete(tv) },
+      { text: "Cancel", style: "cancel" },
+    ]);
+  }
+
+  function startEdit(tv: SavedTV) {
+    setEditingProfileId(tv.id);
+    setEditingName(tv.nickname);
+  }
+
+  function cancelEdit() {
+    setEditingProfileId(null);
+    setEditingName("");
+  }
+
+  async function saveEdit(profileId: string) {
+    const trimmed = editingName.trim();
+    if (!trimmed) {
+      Alert.alert("Name required", "Please enter a TV name.");
+      return;
+    }
+
+    setSavingProfileId(profileId);
+    try {
+      await onRename(profileId, trimmed);
+      cancelEdit();
+    } catch {
+      Alert.alert("Rename failed", "Could not update this TV profile. Please try again.");
+    } finally {
+      setSavingProfileId(null);
+    }
   }
 
   return (
@@ -53,10 +96,28 @@ export function TVProfilesScreen({
         ) : (
           profiles.map((tv) => {
             const active = tv.id === activeTVId;
+            const editing = tv.id === editingProfileId;
+            const saving = tv.id === savingProfileId;
             return (
               <View key={tv.id} style={[styles.rowCard, active && styles.rowCardActive]}>
                 <View style={styles.rowInfo}>
-                  <Text style={styles.rowName}>{tv.nickname}</Text>
+                  {editing ? (
+                    <TextInput
+                      style={styles.editInput}
+                      value={editingName}
+                      onChangeText={setEditingName}
+                      placeholder="TV Name"
+                      placeholderTextColor={palette.textMuted}
+                      autoFocus
+                      autoCorrect={false}
+                      returnKeyType="done"
+                      onSubmitEditing={() => {
+                        void saveEdit(tv.id);
+                      }}
+                    />
+                  ) : (
+                    <Text style={styles.rowName}>{tv.nickname}</Text>
+                  )}
                   <Text style={styles.rowMeta}>
                     {formatBrand(tv.brand)}
                     {tv.host ? ` • ${tv.host}${tv.port ? `:${tv.port}` : ""}` : ""}
@@ -64,30 +125,66 @@ export function TVProfilesScreen({
                 </View>
 
                 <View style={styles.rowActions}>
-                  <Pressable
-                    onPress={() => onSelect(tv.id)}
-                    style={({ pressed }) => [
-                      styles.actionButton,
-                      active && styles.actionButtonActive,
-                      pressed && styles.actionPressed,
-                    ]}
-                  >
-                    <MaterialIcons
-                      name={active ? "check-circle" : "tv"}
-                      size={16}
-                      color={active ? "#5BD4FF" : palette.textPrimary}
-                    />
-                    <Text style={[styles.actionText, active && styles.actionTextActive]}>
-                      {active ? "Active" : "Connect"}
-                    </Text>
-                  </Pressable>
+                  {editing ? (
+                    <>
+                      <Pressable
+                        onPress={() => {
+                          void saveEdit(tv.id);
+                        }}
+                        disabled={saving}
+                        style={({ pressed }) => [
+                          styles.actionButton,
+                          styles.saveButton,
+                          pressed && styles.actionPressed,
+                          saving && styles.disabledButton,
+                        ]}
+                      >
+                        <MaterialIcons name="check" size={16} color="#5BD4FF" />
+                        <Text style={[styles.actionText, styles.actionTextActive]}>
+                          {saving ? "Saving" : "Save"}
+                        </Text>
+                      </Pressable>
 
-                  <Pressable
-                    onPress={() => askDelete(tv)}
-                    style={({ pressed }) => [styles.deleteButton, pressed && styles.actionPressed]}
-                  >
-                    <MaterialIcons name="delete-outline" size={18} color="#FF6E6E" />
-                  </Pressable>
+                      <Pressable
+                        onPress={cancelEdit}
+                        disabled={saving}
+                        style={({ pressed }) => [
+                          styles.iconButton,
+                          pressed && styles.actionPressed,
+                          saving && styles.disabledButton,
+                        ]}
+                      >
+                        <MaterialIcons name="close" size={18} color={palette.textMuted} />
+                      </Pressable>
+                    </>
+                  ) : (
+                    <>
+                      <Pressable
+                        onPress={() => onSelect(tv.id)}
+                        style={({ pressed }) => [
+                          styles.actionButton,
+                          active && styles.actionButtonActive,
+                          pressed && styles.actionPressed,
+                        ]}
+                      >
+                        <MaterialIcons
+                          name={active ? "check-circle" : "tv"}
+                          size={16}
+                          color={active ? "#5BD4FF" : palette.textPrimary}
+                        />
+                        <Text style={[styles.actionText, active && styles.actionTextActive]}>
+                          {active ? "Active" : "Connect"}
+                        </Text>
+                      </Pressable>
+
+                      <Pressable
+                        onPress={() => openProfileMenu(tv)}
+                        style={({ pressed }) => [styles.iconButton, pressed && styles.actionPressed]}
+                      >
+                        <MaterialIcons name="more-vert" size={18} color={palette.textPrimary} />
+                      </Pressable>
+                    </>
+                  )}
                 </View>
               </View>
             );
@@ -172,6 +269,17 @@ const styles = StyleSheet.create({
     fontFamily: fonts.heading,
     fontSize: 16,
   },
+  editInput: {
+    height: 38,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: palette.border,
+    backgroundColor: palette.panel,
+    color: palette.textPrimary,
+    fontFamily: fonts.heading,
+    fontSize: 15,
+    paddingHorizontal: 10,
+  },
   rowMeta: {
     color: palette.textMuted,
     fontFamily: fonts.body,
@@ -180,12 +288,12 @@ const styles = StyleSheet.create({
   rowActions: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 8,
+    gap: 6,
   },
   actionButton: {
-    minWidth: 94,
+    minWidth: 124,
     height: 38,
-    paddingHorizontal: 10,
+    paddingHorizontal: 14,
     borderRadius: 12,
     borderWidth: 1,
     borderColor: palette.border,
@@ -199,6 +307,9 @@ const styles = StyleSheet.create({
     borderColor: "rgba(18, 181, 255, 0.45)",
     backgroundColor: "rgba(18, 181, 255, 0.16)",
   },
+  saveButton: {
+    borderColor: "rgba(18, 181, 255, 0.45)",
+  },
   actionText: {
     color: palette.textPrimary,
     fontFamily: fonts.heading,
@@ -207,7 +318,7 @@ const styles = StyleSheet.create({
   actionTextActive: {
     color: "#5BD4FF",
   },
-  deleteButton: {
+  iconButton: {
     width: 38,
     height: 38,
     borderRadius: 12,
@@ -216,6 +327,9 @@ const styles = StyleSheet.create({
     backgroundColor: palette.panel,
     alignItems: "center",
     justifyContent: "center",
+  },
+  disabledButton: {
+    opacity: 0.55,
   },
   actionPressed: {
     opacity: 0.82,

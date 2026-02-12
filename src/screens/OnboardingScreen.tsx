@@ -1,7 +1,8 @@
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
   KeyboardAvoidingView,
+  NativeModules,
   Platform,
   Pressable,
   ScrollView,
@@ -36,6 +37,25 @@ function formatBrand(brand: TVBrand): string {
   return `${brand.slice(0, 1).toUpperCase()}${brand.slice(1)}`;
 }
 
+function detectLocalPrefix(): string | null {
+  const scriptURL: string | undefined = NativeModules?.SourceCode?.scriptURL;
+  if (!scriptURL) return null;
+
+  const match = scriptURL.match(/(\d{1,3}\.){3}\d{1,3}/);
+  if (!match) return null;
+
+  const ip = match[0];
+  const parts = ip.split(".");
+  if (parts.length !== 4) return null;
+  return `${parts[0]}.${parts[1]}.${parts[2]}`;
+}
+
+function isHostIp(value: string): boolean {
+  const parts = value.split(".");
+  if (parts.length !== 4) return false;
+  return parts.every((part) => /^\d{1,3}$/.test(part) && Number(part) >= 0 && Number(part) <= 255);
+}
+
 export function OnboardingScreen({ onComplete, onCancel }: Props) {
   const [mode, setMode] = useState<SetupMode>("scan");
 
@@ -48,6 +68,10 @@ export function OnboardingScreen({ onComplete, onCancel }: Props) {
   const [scanError, setScanError] = useState<string | null>(null);
   const [scanResults, setScanResults] = useState<DiscoveredTV[]>([]);
   const [selectedDiscoveryId, setSelectedDiscoveryId] = useState<string | null>(null);
+  const [scanPrefixInput, setScanPrefixInput] = useState("");
+  const [detectedPrefix] = useState<string | null>(detectLocalPrefix());
+  const activeScanControllerRef = useRef<AbortController | null>(null);
+  const activeScanRunRef = useRef(0);
 
   const selectedDiscoveredTV = useMemo(
     () => scanResults.find((device) => device.id === selectedDiscoveryId) ?? null,
@@ -58,24 +82,87 @@ export function OnboardingScreen({ onComplete, onCancel }: Props) {
     return Boolean(brand && nickname.trim().length > 0);
   }, [brand, nickname]);
 
+  useEffect(() => {
+    return () => {
+      activeScanControllerRef.current?.abort();
+    };
+  }, []);
+
   async function handleScan() {
+    activeScanControllerRef.current?.abort();
+    const scanController = new AbortController();
+    activeScanControllerRef.current = scanController;
+    const runId = activeScanRunRef.current + 1;
+    activeScanRunRef.current = runId;
+
     setScanLoading(true);
     setScanError(null);
+    setScanResults([]);
     setSelectedDiscoveryId(null);
 
     try {
-      const found = await scanNetworkForTVs();
-      setScanResults(found);
+      const scanTokens = scanPrefixInput
+        .split(",")
+        .map((value) => value.trim())
+        .filter(Boolean);
+      const customHosts = scanTokens.filter(isHostIp);
+      const customPrefixes = scanTokens.filter((token) => !isHostIp(token));
+
+      const prefixesFromDetected = detectedPrefix ? [detectedPrefix] : [];
+      const combinedPrefixes =
+        customPrefixes.length > 0
+          ? customPrefixes
+          : customHosts.length > 0
+            ? []
+            : [...prefixesFromDetected, "192.168.1", "192.168.0", "10.0.0", "10.0.1"];
+
+      const found = await scanNetworkForTVs({
+        prefixes: combinedPrefixes,
+        hosts: customHosts,
+        hostRangeStart: 1,
+        hostRangeEnd: customPrefixes.length > 0 || detectedPrefix ? 254 : 180,
+        maxConcurrentHosts: 24,
+        abortSignal: scanController.signal,
+        onDiscovered: (device) => {
+          if (scanController.signal.aborted) return;
+          if (activeScanRunRef.current !== runId) return;
+          setScanResults((prev) => {
+            if (prev.some((item) => item.host === device.host)) return prev;
+            return [...prev, device];
+          });
+        },
+      });
+      if (activeScanRunRef.current !== runId) return;
+      if (scanController.signal.aborted) {
+        setScanError("Scan canceled.");
+        return;
+      }
       if (found.length === 0) {
         setScanError(
-          "No TVs found in common local ranges. Try Advanced mode to enter host details manually."
+          "No TVs found. Try setting your network prefix (example: 192.168.50) or use Advanced mode."
         );
       }
     } catch {
-      setScanError("Scan failed. Please try again, or use Advanced mode.");
+      if (activeScanRunRef.current !== runId) return;
+      if (scanController.signal.aborted) {
+        setScanError("Scan canceled.");
+      } else {
+        setScanError("Scan failed. Please try again, or use Advanced mode.");
+      }
     } finally {
-      setScanLoading(false);
+      if (activeScanRunRef.current === runId) {
+        setScanLoading(false);
+        if (activeScanControllerRef.current === scanController) {
+          activeScanControllerRef.current = null;
+        }
+      }
     }
+  }
+
+  function handleCancelScan() {
+    activeScanControllerRef.current?.abort();
+    setScanLoading(false);
+    setScanError("Scan canceled.");
   }
 
   function completeWithDiscovery() {
@@ -138,6 +225,21 @@ export function OnboardingScreen({ onComplete, onCancel }: Props) {
                 Scans common local ranges and lists TVs detected on your Wi-Fi. Make sure your TV is turned on.
               </Text>
 
+              {detectedPrefix ? (
+                <Text style={styles.detectedPrefix}>Detected network prefix: {detectedPrefix}</Text>
+              ) : null}
+
+              <TextInput
+                style={styles.input}
+                value={scanPrefixInput}
+                onChangeText={setScanPrefixInput}
+                placeholder="Optional prefix or full IP (e.g. 192.168.103 or 192.168.103.134)"
+                placeholderTextColor={palette.textMuted}
+                autoCapitalize="none"
+                autoCorrect={false}
+                keyboardType="numbers-and-punctuation"
+              />
+
               <Pressable
                 onPress={handleScan}
                 style={({ pressed }) => [styles.scanButton, pressed && styles.scanButtonPressed]}
@@ -154,6 +256,16 @@ export function OnboardingScreen({ onComplete, onCancel }: Props) {
                   </>
                 )}
               </Pressable>
+
+              {scanLoading ? (
+                <Pressable
+                  onPress={handleCancelScan}
+                  style={({ pressed }) => [styles.cancelScanButton, pressed && styles.cancelScanPressed]}
+                >
+                  <MaterialIcons name="close" size={16} color="#FF8B8B" />
+                  <Text style={styles.cancelScanText}>Cancel Scan</Text>
+                </Pressable>
+              ) : null}
 
               {scanError ? <Text style={styles.scanError}>{scanError}</Text> : null}
 
@@ -320,6 +432,11 @@ const styles = StyleSheet.create({
     fontFamily: fonts.body,
     fontSize: 13,
   },
+  detectedPrefix: {
+    color: palette.accent,
+    fontFamily: fonts.body,
+    fontSize: 12,
+  },
   scanButton: {
     height: 46,
     borderRadius: 13,
@@ -338,6 +455,25 @@ const styles = StyleSheet.create({
     color: palette.accent,
     fontFamily: fonts.heading,
     fontSize: 15,
+  },
+  cancelScanButton: {
+    height: 42,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: "rgba(255, 120, 120, 0.35)",
+    backgroundColor: "rgba(255, 120, 120, 0.1)",
+    alignItems: "center",
+    justifyContent: "center",
+    flexDirection: "row",
+    gap: 8,
+  },
+  cancelScanPressed: {
+    backgroundColor: "rgba(255, 120, 120, 0.18)",
+  },
+  cancelScanText: {
+    color: "#FF8B8B",
+    fontFamily: fonts.heading,
+    fontSize: 14,
   },
   scanError: {
     color: "#FF9A9A",
