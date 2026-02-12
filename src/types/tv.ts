@@ -1,4 +1,14 @@
-export type TVBrand = "samsung" | "panasonic" | "vizio" | "tcl" | "lg" | "other";
+export type TVBrand =
+  | "samsung"
+  | "sony"
+  | "roku"
+  | "panasonic"
+  | "vizio"
+  | "tcl"
+  | "lg"
+  | "philips"
+  | "firetv"
+  | "other";
 
 export type SavedTV = {
   id: string;

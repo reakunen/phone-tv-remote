@@ -6,6 +6,7 @@ import { SafeAreaProvider } from "react-native-safe-area-context";
 import { OnboardingScreen } from "./src/screens/OnboardingScreen";
 import { RemoteScreen } from "./src/screens/RemoteScreen";
 import { TVProfilesScreen } from "./src/screens/TVProfilesScreen";
+import { TVSettingsScreen } from "./src/screens/TVSettingsScreen";
 import {
   deleteTVProfile,
   loadTVState,
@@ -16,7 +17,7 @@ import {
 import { palette } from "./src/theme";
 import { SavedTV } from "./src/types/tv";
 
-type ScreenMode = "loading" | "onboarding" | "profiles" | "remote";
+type ScreenMode = "loading" | "onboarding" | "profiles" | "remote" | "settings";
 
 export default function App() {
   const [profiles, setProfiles] = useState<SavedTV[]>([]);
@@ -93,6 +94,14 @@ export default function App() {
     if (activeTVId) setMode("remote");
   }
 
+  function handleOpenSettings() {
+    setMode("settings");
+  }
+
+  function handleBackFromSettings() {
+    setMode("profiles");
+  }
+
   if (!fontError && (!fontsLoaded || mode === "loading")) {
     return (
       <View style={styles.loader}>
@@ -122,8 +131,11 @@ export default function App() {
           onDelete={handleDeleteProfile}
           onRename={handleRenameProfile}
           onAddNew={handleAddNewProfile}
+          onOpenSettings={handleOpenSettings}
           onBackToRemote={activeTV ? handleBackToRemote : undefined}
         />
+      ) : mode === "settings" ? (
+        <TVSettingsScreen onBack={handleBackFromSettings} />
       ) : activeTV ? (
         <RemoteScreen tv={activeTV} onReconfigure={handleSwitchTV} />
       ) : (
@@ -134,6 +146,7 @@ export default function App() {
           onDelete={handleDeleteProfile}
           onRename={handleRenameProfile}
           onAddNew={handleAddNewProfile}
+          onOpenSettings={handleOpenSettings}
         />
       )}
     </SafeAreaProvider>

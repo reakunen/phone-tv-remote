@@ -70,6 +70,14 @@ npm run web
 npm run typecheck
 ```
 
+## iOS Samsung 8002 native path
+
+For Samsung TVs that only accept `wss://<tv>:8002`, this project now includes a local iOS native module in `modules/samsung-remote-ios`.
+
+- This path requires a native build (`expo prebuild` + dev client / EAS build).
+- It will not load inside Expo Go.
+- The module is wired through `src/services/wifiRemote.ts` and does certificate fingerprint pinning for private LAN hosts.
+
 ## How TV commands are sent
 
 UI actions route through:

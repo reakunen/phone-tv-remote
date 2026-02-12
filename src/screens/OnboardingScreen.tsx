@@ -26,14 +26,20 @@ type Props = {
 
 const brands: { value: TVBrand; label: string }[] = [
   { value: "samsung", label: "Samsung" },
+  { value: "sony", label: "Sony" },
+  { value: "roku", label: "Roku" },
   { value: "panasonic", label: "Panasonic" },
   { value: "vizio", label: "Vizio" },
   { value: "tcl", label: "TCL" },
   { value: "lg", label: "LG" },
+  { value: "philips", label: "Philips" },
+  { value: "firetv", label: "Fire TV" },
   { value: "other", label: "Other" },
 ];
 
 function formatBrand(brand: TVBrand): string {
+  if (brand === "firetv") return "Fire TV";
+  if (brand === "tcl") return "TCL";
   return `${brand.slice(0, 1).toUpperCase()}${brand.slice(1)}`;
 }
 
@@ -108,19 +114,20 @@ export function OnboardingScreen({ onComplete, onCancel }: Props) {
       const customHosts = scanTokens.filter(isHostIp);
       const customPrefixes = scanTokens.filter((token) => !isHostIp(token));
 
-      const prefixesFromDetected = detectedPrefix ? [detectedPrefix] : [];
       const combinedPrefixes =
         customPrefixes.length > 0
           ? customPrefixes
           : customHosts.length > 0
             ? []
-            : [...prefixesFromDetected, "192.168.1", "192.168.0", "10.0.0", "10.0.1"];
+            : detectedPrefix
+              ? [detectedPrefix]
+              : undefined;
 
       const found = await scanNetworkForTVs({
         prefixes: combinedPrefixes,
         hosts: customHosts,
         hostRangeStart: 1,
-        hostRangeEnd: customPrefixes.length > 0 || detectedPrefix ? 254 : 180,
+        hostRangeEnd: customPrefixes.length > 0 ? 254 : 180,
         maxConcurrentHosts: 24,
         abortSignal: scanController.signal,
         onDiscovered: (device) => {

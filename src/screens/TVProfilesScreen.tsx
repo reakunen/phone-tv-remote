@@ -1,13 +1,6 @@
-import React, { useState } from "react";
-import {
-  Alert,
-  Pressable,
-  ScrollView,
-  StyleSheet,
-  Text,
-  TextInput,
-  View,
-} from "react-native";
+import AsyncStorage from "@react-native-async-storage/async-storage";
+import React, { useEffect, useMemo, useState } from "react";
+import { Alert, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { MaterialIcons } from "@expo/vector-icons";
 import { SavedTV } from "../types/tv";
@@ -20,10 +13,31 @@ type Props = {
   onDelete: (profileId: string) => void;
   onRename: (profileId: string, nickname: string) => Promise<void> | void;
   onAddNew: () => void;
+  onOpenSettings: () => void;
   onBackToRemote?: () => void;
 };
 
+const REMOTE_THEME_STORAGE_KEY = "tv_remote:theme_mode_v1";
+
+type ThemeMode = "dark" | "light";
+
+const lightPalette: typeof palette = {
+  backgroundA: "#F6F8FC",
+  backgroundB: "#FFFFFF",
+  panel: "#EEF3FB",
+  panelSoft: "#F4F7FC",
+  panelStrong: "#E8EEF7",
+  border: "rgba(57, 82, 128, 0.2)",
+  textPrimary: "#0E1B34",
+  textMuted: "#4F6286",
+  accent: "#0A84FF",
+  accentSoft: "rgba(10, 132, 255, 0.18)",
+  danger: "#E53935",
+};
+
 function formatBrand(brand: SavedTV["brand"]): string {
+  if (brand === "firetv") return "Fire TV";
+  if (brand === "tcl") return "TCL";
   return `${brand.slice(0, 1).toUpperCase()}${brand.slice(1)}`;
 }
 
@@ -34,11 +48,29 @@ export function TVProfilesScreen({
   onDelete,
   onRename,
   onAddNew,
+  onOpenSettings,
   onBackToRemote,
 }: Props) {
   const [editingProfileId, setEditingProfileId] = useState<string | null>(null);
   const [editingName, setEditingName] = useState("");
   const [savingProfileId, setSavingProfileId] = useState<string | null>(null);
+  const [themeMode, setThemeMode] = useState<ThemeMode>("dark");
+
+  const colors = themeMode === "light" ? lightPalette : palette;
+  const styles = useMemo(() => createStyles(colors), [colors]);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const saved = await AsyncStorage.getItem(REMOTE_THEME_STORAGE_KEY);
+        if (saved === "dark" || saved === "light") {
+          setThemeMode(saved);
+        }
+      } catch {
+        // ignore theme load errors
+      }
+    })();
+  }, []);
 
   function askDelete(tv: SavedTV) {
     Alert.alert("Remove TV profile?", `${tv.nickname} will be removed from saved TVs.`, [
@@ -86,8 +118,18 @@ export function TVProfilesScreen({
   return (
     <SafeAreaView style={styles.safe}>
       <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
-        <Text style={styles.title}>Saved TVs</Text>
-        <Text style={styles.subtitle}>Switch quickly or remove old profiles.</Text>
+        <View style={styles.headerRow}>
+          <View>
+            <Text style={styles.title}>Saved TVs</Text>
+            <Text style={styles.subtitle}>Switch quickly or remove old profiles.</Text>
+          </View>
+          <Pressable
+            onPress={onOpenSettings}
+            style={({ pressed }) => [styles.headerMenuButton, pressed && styles.actionPressed]}
+          >
+            <MaterialIcons name="more-vert" size={20} color={colors.textPrimary} />
+          </Pressable>
+        </View>
 
         {profiles.length === 0 ? (
           <View style={styles.emptyCard}>
@@ -107,7 +149,7 @@ export function TVProfilesScreen({
                       value={editingName}
                       onChangeText={setEditingName}
                       placeholder="TV Name"
-                      placeholderTextColor={palette.textMuted}
+                      placeholderTextColor={colors.textMuted}
                       autoFocus
                       autoCorrect={false}
                       returnKeyType="done"
@@ -154,7 +196,7 @@ export function TVProfilesScreen({
                           saving && styles.disabledButton,
                         ]}
                       >
-                        <MaterialIcons name="close" size={18} color={palette.textMuted} />
+                        <MaterialIcons name="close" size={18} color={colors.textMuted} />
                       </Pressable>
                     </>
                   ) : (
@@ -170,7 +212,7 @@ export function TVProfilesScreen({
                         <MaterialIcons
                           name={active ? "check-circle" : "tv"}
                           size={16}
-                          color={active ? "#5BD4FF" : palette.textPrimary}
+                          color={active ? "#5BD4FF" : colors.textPrimary}
                         />
                         <Text style={[styles.actionText, active && styles.actionTextActive]}>
                           {active ? "Active" : "Connect"}
@@ -181,7 +223,7 @@ export function TVProfilesScreen({
                         onPress={() => openProfileMenu(tv)}
                         style={({ pressed }) => [styles.iconButton, pressed && styles.actionPressed]}
                       >
-                        <MaterialIcons name="more-vert" size={18} color={palette.textPrimary} />
+                        <MaterialIcons name="more-vert" size={18} color={colors.textPrimary} />
                       </Pressable>
                     </>
                   )}
@@ -192,7 +234,7 @@ export function TVProfilesScreen({
         )}
 
         <Pressable onPress={onAddNew} style={({ pressed }) => [styles.addButton, pressed && styles.addPressed]}>
-          <MaterialIcons name="add-circle-outline" size={18} color={palette.accent} />
+          <MaterialIcons name="add-circle-outline" size={18} color={colors.accent} />
           <Text style={styles.addText}>Add New TV</Text>
         </Pressable>
 
@@ -201,7 +243,7 @@ export function TVProfilesScreen({
             onPress={onBackToRemote}
             style={({ pressed }) => [styles.backButton, pressed && styles.actionPressed]}
           >
-            <MaterialIcons name="arrow-back" size={18} color={palette.textMuted} />
+            <MaterialIcons name="arrow-back" size={18} color={colors.textMuted} />
             <Text style={styles.backText}>Back to Remote</Text>
           </Pressable>
         ) : null}
@@ -210,166 +252,183 @@ export function TVProfilesScreen({
   );
 }
 
-const styles = StyleSheet.create({
-  safe: {
-    flex: 1,
-    backgroundColor: palette.backgroundA,
-  },
-  content: {
-    paddingHorizontal: 20,
-    paddingTop: 12,
-    paddingBottom: 34,
-    gap: 12,
-  },
-  title: {
-    fontFamily: fonts.heading,
-    fontSize: 30,
-    color: palette.textPrimary,
-  },
-  subtitle: {
-    fontFamily: fonts.body,
-    fontSize: 14,
-    color: palette.textMuted,
-    marginBottom: 6,
-  },
-  emptyCard: {
-    minHeight: 88,
-    borderRadius: 16,
-    borderWidth: 1,
-    borderColor: palette.border,
-    backgroundColor: palette.panelSoft,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  emptyText: {
-    color: palette.textMuted,
-    fontFamily: fonts.body,
-    fontSize: 14,
-  },
-  rowCard: {
-    borderRadius: 16,
-    borderWidth: 1,
-    borderColor: palette.border,
-    backgroundColor: palette.panelSoft,
-    padding: 12,
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 10,
-  },
-  rowCardActive: {
-    borderColor: "rgba(18, 181, 255, 0.45)",
-    backgroundColor: "rgba(18, 181, 255, 0.1)",
-  },
-  rowInfo: {
-    flex: 1,
-    gap: 4,
-  },
-  rowName: {
-    color: palette.textPrimary,
-    fontFamily: fonts.heading,
-    fontSize: 16,
-  },
-  editInput: {
-    height: 38,
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: palette.border,
-    backgroundColor: palette.panel,
-    color: palette.textPrimary,
-    fontFamily: fonts.heading,
-    fontSize: 15,
-    paddingHorizontal: 10,
-  },
-  rowMeta: {
-    color: palette.textMuted,
-    fontFamily: fonts.body,
-    fontSize: 13,
-  },
-  rowActions: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 6,
-  },
-  actionButton: {
-    minWidth: 124,
-    height: 38,
-    paddingHorizontal: 14,
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: palette.border,
-    backgroundColor: palette.panel,
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "center",
-    gap: 6,
-  },
-  actionButtonActive: {
-    borderColor: "rgba(18, 181, 255, 0.45)",
-    backgroundColor: "rgba(18, 181, 255, 0.16)",
-  },
-  saveButton: {
-    borderColor: "rgba(18, 181, 255, 0.45)",
-  },
-  actionText: {
-    color: palette.textPrimary,
-    fontFamily: fonts.heading,
-    fontSize: 12,
-  },
-  actionTextActive: {
-    color: "#5BD4FF",
-  },
-  iconButton: {
-    width: 38,
-    height: 38,
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: palette.border,
-    backgroundColor: palette.panel,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  disabledButton: {
-    opacity: 0.55,
-  },
-  actionPressed: {
-    opacity: 0.82,
-    transform: [{ scale: 0.96 }],
-  },
-  addButton: {
-    marginTop: 8,
-    height: 50,
-    borderRadius: 14,
-    borderWidth: 1,
-    borderColor: "rgba(18, 181, 255, 0.45)",
-    backgroundColor: "rgba(18, 181, 255, 0.1)",
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "center",
-    gap: 8,
-  },
-  addPressed: {
-    backgroundColor: "rgba(18, 181, 255, 0.2)",
-  },
-  addText: {
-    color: palette.accent,
-    fontFamily: fonts.heading,
-    fontSize: 15,
-  },
-  backButton: {
-    marginTop: 2,
-    height: 44,
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: palette.border,
-    backgroundColor: palette.panel,
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "center",
-    gap: 8,
-  },
-  backText: {
-    color: palette.textMuted,
-    fontFamily: fonts.heading,
-    fontSize: 14,
-  },
-});
+const createStyles = (colors: typeof palette) =>
+  StyleSheet.create({
+    safe: {
+      flex: 1,
+      backgroundColor: colors.backgroundA,
+    },
+    content: {
+      paddingHorizontal: 20,
+      paddingTop: 12,
+      paddingBottom: 34,
+      gap: 12,
+    },
+    headerRow: {
+      flexDirection: "row",
+      justifyContent: "space-between",
+      alignItems: "flex-start",
+      marginBottom: 6,
+    },
+    title: {
+      fontFamily: fonts.heading,
+      fontSize: 30,
+      color: colors.textPrimary,
+    },
+    subtitle: {
+      fontFamily: fonts.body,
+      fontSize: 14,
+      color: colors.textMuted,
+      marginTop: 2,
+    },
+    headerMenuButton: {
+      width: 42,
+      height: 42,
+      borderRadius: 12,
+      borderWidth: 1,
+      borderColor: colors.border,
+      backgroundColor: colors.panel,
+      alignItems: "center",
+      justifyContent: "center",
+    },
+    emptyCard: {
+      minHeight: 88,
+      borderRadius: 16,
+      borderWidth: 1,
+      borderColor: colors.border,
+      backgroundColor: colors.panelSoft,
+      alignItems: "center",
+      justifyContent: "center",
+    },
+    emptyText: {
+      color: colors.textMuted,
+      fontFamily: fonts.body,
+      fontSize: 14,
+    },
+    rowCard: {
+      borderRadius: 16,
+      borderWidth: 1,
+      borderColor: colors.border,
+      backgroundColor: colors.panelSoft,
+      padding: 12,
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 10,
+    },
+    rowCardActive: {
+      borderColor: "rgba(18, 181, 255, 0.45)",
+      backgroundColor: "rgba(18, 181, 255, 0.1)",
+    },
+    rowInfo: {
+      flex: 1,
+      gap: 4,
+    },
+    rowName: {
+      color: colors.textPrimary,
+      fontFamily: fonts.heading,
+      fontSize: 16,
+    },
+    editInput: {
+      height: 38,
+      borderRadius: 10,
+      borderWidth: 1,
+      borderColor: colors.border,
+      backgroundColor: colors.panel,
+      color: colors.textPrimary,
+      fontFamily: fonts.heading,
+      fontSize: 15,
+      paddingHorizontal: 10,
+    },
+    rowMeta: {
+      color: colors.textMuted,
+      fontFamily: fonts.body,
+      fontSize: 13,
+    },
+    rowActions: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 6,
+    },
+    actionButton: {
+      minWidth: 124,
+      height: 38,
+      paddingHorizontal: 14,
+      borderRadius: 12,
+      borderWidth: 1,
+      borderColor: colors.border,
+      backgroundColor: colors.panel,
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "center",
+      gap: 6,
+    },
+    actionButtonActive: {
+      borderColor: "rgba(18, 181, 255, 0.45)",
+      backgroundColor: "rgba(18, 181, 255, 0.16)",
+    },
+    saveButton: {
+      borderColor: "rgba(18, 181, 255, 0.45)",
+    },
+    actionText: {
+      color: colors.textPrimary,
+      fontFamily: fonts.heading,
+      fontSize: 12,
+    },
+    actionTextActive: {
+      color: "#5BD4FF",
+    },
+    iconButton: {
+      width: 38,
+      height: 38,
+      borderRadius: 12,
+      borderWidth: 1,
+      borderColor: colors.border,
+      backgroundColor: colors.panel,
+      alignItems: "center",
+      justifyContent: "center",
+    },
+    disabledButton: {
+      opacity: 0.55,
+    },
+    actionPressed: {
+      opacity: 0.82,
+      transform: [{ scale: 0.96 }],
+    },
+    addButton: {
+      marginTop: 8,
+      height: 50,
+      borderRadius: 14,
+      borderWidth: 1,
+      borderColor: "rgba(18, 181, 255, 0.45)",
+      backgroundColor: "rgba(18, 181, 255, 0.1)",
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "center",
+      gap: 8,
+    },
+    addPressed: {
+      backgroundColor: "rgba(18, 181, 255, 0.2)",
+    },
+    addText: {
+      color: colors.accent,
+      fontFamily: fonts.heading,
+      fontSize: 15,
+    },
+    backButton: {
+      marginTop: 2,
+      height: 44,
+      borderRadius: 12,
+      borderWidth: 1,
+      borderColor: colors.border,
+      backgroundColor: colors.panel,
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "center",
+      gap: 8,
+    },
+    backText: {
+      color: colors.textMuted,
+      fontFamily: fonts.heading,
+      fontSize: 14,
+    },
+  });

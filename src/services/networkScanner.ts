@@ -7,7 +7,17 @@ export type DiscoveredTV = {
   nickname: string;
   host: string;
   port: number;
-  source: "roku" | "samsung" | "chromecast" | "bridge";
+  source:
+    | "roku"
+    | "samsung"
+    | "sony"
+    | "chromecast"
+    | "lg"
+    | "vizio"
+    | "philips"
+    | "panasonic"
+    | "firetv"
+    | "bridge";
 };
 
 export type ScanOptions = {
@@ -31,14 +41,21 @@ const defaultScanPrefixes = [
 const defaultHostRangeStart = 1;
 const defaultHostRangeEnd = 254;
 const defaultMaxConcurrentHosts = 28;
+const samsungSocketProbeTimeoutMs = 700;
 
 function mapBrand(label: string): TVBrand {
   const value = label.toLowerCase();
   if (value.includes("samsung")) return "samsung";
+  if (value.includes("sony") || value.includes("bravia")) return "sony";
+  if (value.includes("roku")) return "roku";
   if (value.includes("panasonic")) return "panasonic";
   if (value.includes("vizio")) return "vizio";
-  if (value.includes("tcl") || value.includes("roku")) return "tcl";
-  if (value.includes("lg")) return "lg";
+  if (value.includes("tcl")) return "tcl";
+  if (value.includes("lg") || value.includes("webos")) return "lg";
+  if (value.includes("philips")) return "philips";
+  if (value.includes("amazon") || value.includes("fire tv") || value.includes("aft")) {
+    return "firetv";
+  }
   return "other";
 }
 
@@ -55,13 +72,14 @@ function bindAbort(signal: AbortSignal | undefined, onAbort: () => void): () => 
 async function fetchWithTimeout(
   url: string,
   timeoutMs = 450,
-  abortSignal?: AbortSignal
+  abortSignal?: AbortSignal,
+  options: RequestInit = {}
 ): Promise<Response> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   const unbindAbort = bindAbort(abortSignal, () => controller.abort());
   try {
-    return await fetch(url, { signal: controller.signal });
+    return await fetch(url, { ...options, signal: controller.signal });
   } finally {
     clearTimeout(timeout);
     unbindAbort();
@@ -157,7 +175,7 @@ async function probeRoku(host: string, abortSignal?: AbortSignal): Promise<Disco
     const vendorName = parseTag(text, "vendor-name") ?? "";
     const modelName = parseTag(text, "model-name") ?? "";
 
-    const brand = mapBrand(`${vendorName} ${modelName} Roku`);
+    const brand: TVBrand = "roku";
     return {
       id: `roku-${host}`,
       brand,
@@ -171,12 +189,16 @@ async function probeRoku(host: string, abortSignal?: AbortSignal): Promise<Disco
   }
 }
 
-async function probeSamsung(host: string, abortSignal?: AbortSignal): Promise<DiscoveredTV | null> {
+async function probeSamsung(
+  host: string,
+  abortSignal?: AbortSignal,
+  allowSocketFallback = false
+): Promise<DiscoveredTV | null> {
   if (abortSignal?.aborted) return null;
   const fallbackNickname = `Samsung TV (${host})`;
 
   try {
-    const response = await fetchWithTimeout(`http://${host}:8001/api/v2/`, 1000, abortSignal);
+    const response = await fetchWithTimeout(`http://${host}:8001/api/v2/`, 650, abortSignal);
     const text = await response.text();
     let deviceName = "";
     let modelName = "";
@@ -211,12 +233,12 @@ async function probeSamsung(host: string, abortSignal?: AbortSignal): Promise<Di
   } catch {
     // Continue with websocket fallback probing.
   }
-  if (abortSignal?.aborted) return null;
+  if (abortSignal?.aborted || !allowSocketFallback) return null;
 
-  const appName = base64EncodeAscii("TV Remote Expo");
+  const appName = base64EncodeAscii("PhoneRemote");
   const ws8001 = await canOpenWebSocket(
     `ws://${host}:8001/api/v2/channels/samsung.remote.control?name=${appName}`,
-    1500,
+    samsungSocketProbeTimeoutMs,
     abortSignal
   );
   if (ws8001) {
@@ -232,7 +254,7 @@ async function probeSamsung(host: string, abortSignal?: AbortSignal): Promise<Di
 
   const ws8002 = await canOpenWebSocket(
     `wss://${host}:8002/api/v2/channels/samsung.remote.control?name=${appName}`,
-    1500,
+    samsungSocketProbeTimeoutMs,
     abortSignal
   );
   if (ws8002) {
@@ -247,6 +269,328 @@ async function probeSamsung(host: string, abortSignal?: AbortSignal): Promise<Di
   }
 
   return null;
+}
+
+async function probeSony(host: string, abortSignal?: AbortSignal): Promise<DiscoveredTV | null> {
+  if (abortSignal?.aborted) return null;
+
+  try {
+    const response = await fetchWithTimeout(
+      `http://${host}:80/sony/system`,
+      550,
+      abortSignal,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json",
+        },
+        body: JSON.stringify({
+          method: "getSystemInformation",
+          params: [],
+          id: 1,
+          version: "1.0",
+        }),
+      }
+    );
+    const body = await response.text();
+    const normalized = body.toLowerCase();
+
+    if (response.status === 401 || response.status === 403) {
+      return {
+        id: `sony-${host}-auth`,
+        brand: "sony",
+        nickname: `Sony TV (${host})`,
+        host,
+        port: 80,
+        source: "sony",
+      };
+    }
+
+    if (!response.ok && response.status >= 500) {
+      return null;
+    }
+
+    let nickname = `Sony TV (${host})`;
+    try {
+      const payload = JSON.parse(body) as {
+        result?: Array<{ model?: string; product?: string; generation?: string }>;
+      };
+      const info = payload.result?.[0];
+      const label = [info?.model, info?.product, info?.generation]
+        .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+        .join(" ");
+      if (label) nickname = label;
+    } catch {
+      // Ignore parse errors and keep heuristic fallback.
+    }
+
+    const looksSony =
+      normalized.includes("sony") ||
+      normalized.includes("bravia") ||
+      normalized.includes("illegal request") ||
+      normalized.includes("\"result\"") ||
+      normalized.includes("\"error\"");
+
+    if (!looksSony) return null;
+
+    return {
+      id: `sony-${host}`,
+      brand: "sony",
+      nickname,
+      host,
+      port: 80,
+      source: "sony",
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function probeLG(
+  host: string,
+  abortSignal?: AbortSignal,
+  allowSocketProbe = false
+): Promise<DiscoveredTV | null> {
+  if (abortSignal?.aborted) return null;
+
+  try {
+    const response = await fetchWithTimeout(`http://${host}:3000/`, 420, abortSignal);
+    if (response.ok || response.status < 500) {
+      return {
+        id: `lg-${host}-http3000`,
+        brand: "lg",
+        nickname: `LG TV (${host})`,
+        host,
+        port: 3000,
+        source: "lg",
+      };
+    }
+  } catch {
+    // Continue with websocket probing on explicit host scans only.
+  }
+
+  if (!allowSocketProbe || abortSignal?.aborted) return null;
+
+  const ws3000 = await canOpenWebSocket(`ws://${host}:3000`, 900, abortSignal);
+  if (ws3000) {
+    return {
+      id: `lg-${host}-ws3000`,
+      brand: "lg",
+      nickname: `LG TV (${host})`,
+      host,
+      port: 3000,
+      source: "lg",
+    };
+  }
+
+  const ws3001 = await canOpenWebSocket(`wss://${host}:3001`, 900, abortSignal);
+  if (ws3001) {
+    return {
+      id: `lg-${host}-ws3001`,
+      brand: "lg",
+      nickname: `LG TV (${host})`,
+      host,
+      port: 3001,
+      source: "lg",
+    };
+  }
+
+  return null;
+}
+
+async function probeVizio(host: string, abortSignal?: AbortSignal): Promise<DiscoveredTV | null> {
+  if (abortSignal?.aborted) return null;
+
+  try {
+    const response = await fetchWithTimeout(`http://${host}:7345/state/device/name`, 420, abortSignal);
+    if (!response.ok && response.status !== 401) {
+      return null;
+    }
+
+    let label = "VIZIO TV";
+    try {
+      const payload = (await response.json()) as {
+        ITEM?: { VALUE?: { NAME?: string } };
+      };
+      const candidate = payload.ITEM?.VALUE?.NAME;
+      if (candidate && candidate.trim().length > 0) {
+        label = candidate.trim();
+      }
+    } catch {
+      // Some models return non-JSON on unauthenticated reads.
+    }
+
+    return {
+      id: `vizio-${host}`,
+      brand: "vizio",
+      nickname: label,
+      host,
+      port: 7345,
+      source: "vizio",
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function probePhilips(host: string, abortSignal?: AbortSignal): Promise<DiscoveredTV | null> {
+  if (abortSignal?.aborted) return null;
+
+  const endpoints = [`http://${host}:1925/6/system`, `http://${host}:1925/1/system`];
+
+  for (const endpoint of endpoints) {
+    try {
+      const response = await fetchWithTimeout(endpoint, 500, abortSignal);
+      const body = await response.text();
+      const normalized = body.toLowerCase();
+
+      if (response.status === 401 || response.status === 403) {
+        return {
+          id: `philips-${host}-auth`,
+          brand: "philips",
+          nickname: `Philips TV (${host})`,
+          host,
+          port: 1925,
+          source: "philips",
+        };
+      }
+
+      if (!response.ok && response.status >= 500) {
+        continue;
+      }
+
+      let nickname = `Philips TV (${host})`;
+      try {
+        const payload = JSON.parse(body) as {
+          name?: string;
+          model?: string;
+          serialnumber_encrypted?: string;
+        };
+        const label = [payload.name, payload.model]
+          .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+          .join(" ");
+        if (label) nickname = label;
+      } catch {
+        // Keep fallback nickname.
+      }
+
+      const looksPhilips =
+        normalized.includes("philips") ||
+        normalized.includes("jointspace") ||
+        normalized.includes("ambilight") ||
+        normalized.includes("featuring");
+
+      if (!looksPhilips) {
+        continue;
+      }
+
+      return {
+        id: `philips-${host}`,
+        brand: "philips",
+        nickname,
+        host,
+        port: 1925,
+        source: "philips",
+      };
+    } catch {
+      // continue
+    }
+  }
+
+  return null;
+}
+
+async function probePanasonic(host: string, abortSignal?: AbortSignal): Promise<DiscoveredTV | null> {
+  if (abortSignal?.aborted) return null;
+
+  const endpoints = [`http://${host}:55000/nrc/sdd_0.xml`, `http://${host}:55000/nrc/ddd.xml`];
+
+  for (const endpoint of endpoints) {
+    try {
+      const response = await fetchWithTimeout(endpoint, 500, abortSignal);
+      const body = await response.text();
+      const normalized = body.toLowerCase();
+
+      if (response.status === 401 || response.status === 403) {
+        return {
+          id: `panasonic-${host}-auth`,
+          brand: "panasonic",
+          nickname: `Panasonic TV (${host})`,
+          host,
+          port: 55000,
+          source: "panasonic",
+        };
+      }
+
+      if (!response.ok && response.status >= 500) {
+        continue;
+      }
+
+      const friendlyName = parseTag(body, "friendlyName");
+      const modelName = parseTag(body, "modelName");
+      const nickname = friendlyName || modelName || `Panasonic TV (${host})`;
+
+      const looksPanasonic =
+        normalized.includes("panasonic") ||
+        normalized.includes("viera") ||
+        normalized.includes("p00networkcontrol") ||
+        normalized.includes("x_sendkey");
+
+      if (!looksPanasonic) {
+        continue;
+      }
+
+      return {
+        id: `panasonic-${host}`,
+        brand: "panasonic",
+        nickname,
+        host,
+        port: 55000,
+        source: "panasonic",
+      };
+    } catch {
+      // continue
+    }
+  }
+
+  return null;
+}
+
+async function probeFireTv(host: string, abortSignal?: AbortSignal): Promise<DiscoveredTV | null> {
+  if (abortSignal?.aborted) return null;
+
+  try {
+    const response = await fetchWithTimeout(
+      `http://${host}:8009/ssdp/device-desc.xml`,
+      500,
+      abortSignal
+    );
+    if (!response.ok) return null;
+    const xml = await response.text();
+
+    const manufacturer = parseTag(xml, "manufacturer") ?? "";
+    const modelName = parseTag(xml, "modelName") ?? "";
+    const friendlyName = parseTag(xml, "friendlyName") ?? "";
+    const merged = `${manufacturer} ${modelName} ${friendlyName}`.toLowerCase();
+    const looksFireTv =
+      merged.includes("amazon") || merged.includes("fire tv") || /^aft/i.test(modelName.trim());
+
+    if (!looksFireTv) {
+      return null;
+    }
+
+    return {
+      id: `firetv-${host}`,
+      brand: "firetv",
+      nickname: friendlyName || modelName || `Fire TV (${host})`,
+      host,
+      port: 8009,
+      source: "firetv",
+    };
+  } catch {
+    return null;
+  }
 }
 
 async function probeChromecast(host: string, abortSignal?: AbortSignal): Promise<DiscoveredTV | null> {
@@ -294,11 +638,21 @@ async function probeBridge(host: string, abortSignal?: AbortSignal): Promise<Dis
   }
 }
 
-async function probeHost(host: string, abortSignal?: AbortSignal): Promise<DiscoveredTV | null> {
+async function probeHost(
+  host: string,
+  abortSignal?: AbortSignal,
+  allowSamsungSocketFallback = false
+): Promise<DiscoveredTV | null> {
   if (abortSignal?.aborted) return null;
   const results = await Promise.all([
     probeRoku(host, abortSignal),
-    probeSamsung(host, abortSignal),
+    probeSamsung(host, abortSignal, allowSamsungSocketFallback),
+    probeSony(host, abortSignal),
+    probeLG(host, abortSignal, allowSamsungSocketFallback),
+    probeVizio(host, abortSignal),
+    probePhilips(host, abortSignal),
+    probePanasonic(host, abortSignal),
+    probeFireTv(host, abortSignal),
     probeChromecast(host, abortSignal),
     probeBridge(host, abortSignal),
   ]);
@@ -308,7 +662,7 @@ async function probeHost(host: string, abortSignal?: AbortSignal): Promise<Disco
 
 async function probeGenericHost(host: string, abortSignal?: AbortSignal): Promise<DiscoveredTV | null> {
   if (abortSignal?.aborted) return null;
-  const candidates = [80, 8008, 8001, 8002, 8060, 8080];
+  const candidates = [80, 10000, 1925, 3000, 3001, 7345, 8008, 8009, 8001, 8002, 8060, 8080, 55000];
   for (const port of candidates) {
     if (abortSignal?.aborted) return null;
     try {
@@ -364,16 +718,18 @@ async function normalizePrefixes(prefixes?: string[]): Promise<string[]> {
   if (prefixes !== undefined && prefixes.length === 0) return [];
   const candidate = prefixes?.map((value) => value.trim()).filter(Boolean) ?? [];
   const localPrefix = await getLocalNetworkPrefix();
-  const base =
-    candidate.length > 0
-      ? localPrefix
-        ? [localPrefix, ...candidate]
-        : candidate
-      : localPrefix
-        ? [localPrefix, ...defaultScanPrefixes]
-        : defaultScanPrefixes;
-  const valid = base.filter(isValidPrefix);
-  return valid.length > 0 ? [...new Set(valid)] : [...new Set(defaultScanPrefixes)];
+  if (candidate.length > 0) {
+    const validCandidate = candidate.filter(isValidPrefix);
+    if (validCandidate.length > 0) {
+      return [...new Set(validCandidate)];
+    }
+  }
+
+  if (localPrefix) {
+    return [localPrefix];
+  }
+
+  return [...new Set(defaultScanPrefixes)];
 }
 
 function isValidHost(host: string): boolean {
@@ -410,6 +766,7 @@ function buildHosts(prefixes: string[], hostRangeStart: number, hostRangeEnd: nu
 export async function scanNetworkForTVs(options?: ScanOptions): Promise<DiscoveredTV[]> {
   const prefixes = await normalizePrefixes(options?.prefixes);
   const explicitHosts = normalizeHosts(options?.hosts);
+  const explicitHostSet = new Set(explicitHosts);
   const start = clamp(options?.hostRangeStart ?? defaultHostRangeStart, 1, 254);
   const end = clamp(options?.hostRangeEnd ?? defaultHostRangeEnd, start, 254);
   const concurrency = clamp(options?.maxConcurrentHosts ?? defaultMaxConcurrentHosts, 8, 128);
@@ -429,7 +786,8 @@ export async function scanNetworkForTVs(options?: ScanOptions): Promise<Discover
       const host = hosts[cursor];
       cursor += 1;
       if (!host) continue;
-      const found = await probeHost(host, abortSignal);
+      const isExplicitHost = explicitHostSet.has(host);
+      const found = await probeHost(host, abortSignal, isExplicitHost);
       if (found) {
         if (!seenHosts.has(found.host)) {
           seenHosts.add(found.host);
@@ -439,6 +797,10 @@ export async function scanNetworkForTVs(options?: ScanOptions): Promise<Discover
           discovered.push(found);
           onDiscovered?.(found);
         }
+        continue;
+      }
+
+      if (!isExplicitHost) {
         continue;
       }
 

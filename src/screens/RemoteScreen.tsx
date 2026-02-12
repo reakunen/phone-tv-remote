@@ -1,4 +1,5 @@
-import React, { ReactNode, useState } from "react";
+import AsyncStorage from "@react-native-async-storage/async-storage";
+import React, { ReactNode, useEffect, useMemo, useState } from "react";
 import {
   Modal,
   Pressable,
@@ -6,12 +7,19 @@ import {
   StyleProp,
   StyleSheet,
   Text,
+  TextInput,
   View,
   ViewStyle,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { MaterialIcons } from "@expo/vector-icons";
-import { dispatchWifiCommand } from "../services/wifiRemote";
+import {
+  completeSonyPairing,
+  completeVizioPairing,
+  dispatchWifiCommand,
+  SonyPairingChallenge,
+  VizioPairingChallenge
+} from "../services/wifiRemote";
 import { palette, fonts } from "../theme";
 import { RemoteCommand, SavedTV } from "../types/tv";
 
@@ -28,42 +36,98 @@ type KeyProps = {
   style?: StyleProp<ViewStyle>;
 };
 
-function Key({ children, onPress, active, circle, style }: KeyProps) {
-  return (
-    <Pressable
-      onPress={onPress}
-      style={({ pressed }) => [
-        styles.key,
-        circle && styles.keyCircle,
-        active && styles.keyActive,
-        pressed && styles.keyPressed,
-        style,
-      ]}
-    >
-      {({ pressed }) =>
-        typeof children === "function"
-          ? (children as (pressed: boolean) => ReactNode)(pressed)
-          : children
-      }
-    </Pressable>
-  );
-}
-
 const digitLayout: string[][] = [
   ["1", "2", "3"],
   ["4", "5", "6"],
   ["7", "8", "9"],
 ];
 
+const REMOTE_THEME_STORAGE_KEY = "tv_remote:theme_mode_v1";
+
+type ThemeMode = "dark" | "light";
+
+const lightPalette: typeof palette = {
+  backgroundA: "#F6F8FC",
+  backgroundB: "#FFFFFF",
+  panel: "#EEF3FB",
+  panelSoft: "#F4F7FC",
+  panelStrong: "#E8EEF7",
+  border: "rgba(57, 82, 128, 0.2)",
+  textPrimary: "#0E1B34",
+  textMuted: "#4F6286",
+  accent: "#0A84FF",
+  accentSoft: "rgba(10, 132, 255, 0.18)",
+  danger: "#E53935",
+};
+
 export function RemoteScreen({ tv, onReconfigure }: Props) {
-  const [status, setStatus] = useState(`Connected profile: ${tv.nickname}`);
+  const footerStatus = `${tv.nickname}`;
+  const [themeMode, setThemeMode] = useState<ThemeMode>("dark");
   const [isNumpadOpen, setIsNumpadOpen] = useState(false);
   const [channelInput, setChannelInput] = useState("");
+  const [isVizioPairingOpen, setIsVizioPairingOpen] = useState(false);
+  const [vizioPin, setVizioPin] = useState("");
+  const [vizioChallenge, setVizioChallenge] = useState<VizioPairingChallenge | null>(null);
+  const [pendingVizioCommand, setPendingVizioCommand] = useState<RemoteCommand | null>(null);
+  const [isSubmittingVizioPin, setIsSubmittingVizioPin] = useState(false);
+  const [isSonyPairingOpen, setIsSonyPairingOpen] = useState(false);
+  const [sonyPsk, setSonyPsk] = useState("");
+  const [sonyChallenge, setSonyChallenge] = useState<SonyPairingChallenge | null>(null);
+  const [pendingSonyCommand, setPendingSonyCommand] = useState<RemoteCommand | null>(null);
+  const [isSubmittingSonyPsk, setIsSubmittingSonyPsk] = useState(false);
+  const colors = themeMode === "light" ? lightPalette : palette;
+  const styles = useMemo(() => createStyles(colors), [colors]);
+
+  function Key({ children, onPress, active, circle, style }: KeyProps) {
+    return (
+      <Pressable
+        onPress={onPress}
+        style={({ pressed }) => [
+          styles.key,
+          circle && styles.keyCircle,
+          active && styles.keyActive,
+          pressed && styles.keyPressed,
+          style,
+        ]}
+      >
+        {({ pressed }) =>
+          typeof children === "function"
+            ? (children as (pressed: boolean) => ReactNode)(pressed)
+            : children
+        }
+      </Pressable>
+    );
+  }
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const saved = await AsyncStorage.getItem(REMOTE_THEME_STORAGE_KEY);
+        if (saved === "dark" || saved === "light") {
+          setThemeMode(saved);
+        }
+      } catch {
+        // ignore theme load errors
+      }
+    })();
+  }, []);
 
   async function send(command: RemoteCommand) {
-    setStatus(`Sending ${command}...`);
     const result = await dispatchWifiCommand(tv, command);
-    setStatus(result.ok ? `${command} sent` : result.message);
+    if (result.pairing?.brand === "vizio") {
+      setVizioChallenge(result.pairing.challenge);
+      setPendingVizioCommand(command);
+      setVizioPin("");
+      setIsVizioPairingOpen(true);
+      return;
+    }
+    if (result.pairing?.brand === "sony") {
+      setSonyChallenge(result.pairing.challenge);
+      setPendingSonyCommand(command);
+      setSonyPsk("");
+      setIsSonyPairingOpen(true);
+      return;
+    }
   }
 
   async function openNumpad() {
@@ -74,6 +138,90 @@ export function RemoteScreen({ tv, onReconfigure }: Props) {
 
   function closeNumpad() {
     setIsNumpadOpen(false);
+  }
+
+  function closeVizioPairing() {
+    if (isSubmittingVizioPin) return;
+    setIsVizioPairingOpen(false);
+    setVizioPin("");
+    setPendingVizioCommand(null);
+    setVizioChallenge(null);
+  }
+
+  function closeSonyPairing() {
+    if (isSubmittingSonyPsk) return;
+    setIsSonyPairingOpen(false);
+    setSonyPsk("");
+    setPendingSonyCommand(null);
+    setSonyChallenge(null);
+  }
+
+  async function submitVizioPin() {
+    if (!vizioChallenge) {
+      return;
+    }
+
+    setIsSubmittingVizioPin(true);
+    try {
+      const pairResult = await completeVizioPairing(tv, vizioPin, vizioChallenge);
+      if (!pairResult.ok) {
+        if (pairResult.pairing?.brand === "vizio") {
+          setVizioChallenge(pairResult.pairing.challenge);
+        }
+        return;
+      }
+
+      setIsVizioPairingOpen(false);
+      setVizioPin("");
+      setVizioChallenge(null);
+
+      const commandToRetry = pendingVizioCommand;
+      setPendingVizioCommand(null);
+      if (!commandToRetry) return;
+
+      const retryResult = await dispatchWifiCommand(tv, commandToRetry);
+      if (retryResult.pairing?.brand === "vizio") {
+        setVizioChallenge(retryResult.pairing.challenge);
+        setPendingVizioCommand(commandToRetry);
+        setIsVizioPairingOpen(true);
+      }
+    } finally {
+      setIsSubmittingVizioPin(false);
+    }
+  }
+
+  async function submitSonyPsk() {
+    if (!sonyChallenge) {
+      return;
+    }
+
+    setIsSubmittingSonyPsk(true);
+    try {
+      const pairResult = await completeSonyPairing(tv, sonyPsk);
+      if (!pairResult.ok) {
+        if (pairResult.pairing?.brand === "sony") {
+          setSonyChallenge(pairResult.pairing.challenge);
+        }
+        return;
+      }
+
+      setIsSonyPairingOpen(false);
+      setSonyPsk("");
+      setSonyChallenge(null);
+
+      const commandToRetry = pendingSonyCommand;
+      setPendingSonyCommand(null);
+      if (!commandToRetry) return;
+
+      const retryResult = await dispatchWifiCommand(tv, commandToRetry);
+      if (retryResult.pairing?.brand === "sony") {
+        setSonyChallenge(retryResult.pairing.challenge);
+        setPendingSonyCommand(commandToRetry);
+        setIsSonyPairingOpen(true);
+      }
+    } finally {
+      setIsSubmittingSonyPsk(false);
+    }
   }
 
   async function pressDigit(digit: string) {
@@ -89,13 +237,10 @@ export function RemoteScreen({ tv, onReconfigure }: Props) {
 
   async function pressEnter() {
     if (channelInput.length === 0) {
-      setStatus("Enter at least one digit.");
       return;
     }
 
-    const submitted = channelInput;
     await send("numpadEnter");
-    setStatus(`Channel ${submitted} submitted.`);
     setChannelInput("");
     setIsNumpadOpen(false);
   }
@@ -115,7 +260,7 @@ export function RemoteScreen({ tv, onReconfigure }: Props) {
               <MaterialIcons
                 name="power-settings-new"
                 size={28}
-                color={pressed ? "#FF6E6E" : palette.danger}
+                color={pressed ? "#FF6E6E" : colors.danger}
               />
             )}
           </Key>
@@ -124,7 +269,7 @@ export function RemoteScreen({ tv, onReconfigure }: Props) {
               <MaterialIcons
                 name="input"
                 size={25}
-                color={pressed ? palette.accent : palette.textPrimary}
+                color={pressed ? colors.accent : colors.textPrimary}
               />
             )}
           </Key>
@@ -140,7 +285,7 @@ export function RemoteScreen({ tv, onReconfigure }: Props) {
                 <MaterialIcons
                   name="keyboard-arrow-up"
                   size={36}
-                  color={pressed ? palette.accent : palette.textPrimary}
+                  color={pressed ? colors.accent : colors.textPrimary}
                 />
               )}
             </Pressable>
@@ -156,7 +301,7 @@ export function RemoteScreen({ tv, onReconfigure }: Props) {
                 <MaterialIcons
                   name="keyboard-arrow-left"
                   size={36}
-                  color={pressed ? palette.accent : palette.textPrimary}
+                  color={pressed ? colors.accent : colors.textPrimary}
                 />
               )}
             </Pressable>
@@ -172,7 +317,7 @@ export function RemoteScreen({ tv, onReconfigure }: Props) {
                 <MaterialIcons
                   name="keyboard-arrow-right"
                   size={36}
-                  color={pressed ? palette.accent : palette.textPrimary}
+                  color={pressed ? colors.accent : colors.textPrimary}
                 />
               )}
             </Pressable>
@@ -188,7 +333,7 @@ export function RemoteScreen({ tv, onReconfigure }: Props) {
                 <MaterialIcons
                   name="keyboard-arrow-down"
                   size={36}
-                  color={pressed ? palette.accent : palette.textPrimary}
+                  color={pressed ? colors.accent : colors.textPrimary}
                 />
               )}
             </Pressable>
@@ -210,7 +355,7 @@ export function RemoteScreen({ tv, onReconfigure }: Props) {
               <MaterialIcons
                 name="undo"
                 size={24}
-                color={pressed ? palette.accent : palette.textPrimary}
+                color={pressed ? colors.accent : colors.textPrimary}
               />
             )}
           </Key>
@@ -219,7 +364,7 @@ export function RemoteScreen({ tv, onReconfigure }: Props) {
               <MaterialIcons
                 name="home"
                 size={24}
-                color={pressed ? "#5BD4FF" : palette.accent}
+                color={pressed ? "#5BD4FF" : colors.accent}
               />
             )}
           </Key>
@@ -228,7 +373,7 @@ export function RemoteScreen({ tv, onReconfigure }: Props) {
               <MaterialIcons
                 name="settings"
                 size={24}
-                color={pressed ? palette.accent : palette.textPrimary}
+                color={pressed ? colors.accent : colors.textPrimary}
               />
             )}
           </Key>
@@ -258,7 +403,7 @@ export function RemoteScreen({ tv, onReconfigure }: Props) {
               <MaterialIcons
                 name="volume-off"
                 size={24}
-                color={pressed ? palette.accent : palette.textPrimary}
+                color={pressed ? colors.accent : colors.textPrimary}
               />
             )}
           </Key>
@@ -288,7 +433,7 @@ export function RemoteScreen({ tv, onReconfigure }: Props) {
               <MaterialIcons
                 name="skip-previous"
                 size={24}
-                color={pressed ? palette.accent : palette.textPrimary}
+                color={pressed ? colors.accent : colors.textPrimary}
               />
             )}
           </Key>
@@ -297,7 +442,7 @@ export function RemoteScreen({ tv, onReconfigure }: Props) {
               <MaterialIcons
                 name="play-arrow"
                 size={27}
-                color={pressed ? "#5BD4FF" : palette.accent}
+                color={pressed ? "#5BD4FF" : colors.accent}
               />
             )}
           </Key>
@@ -306,7 +451,7 @@ export function RemoteScreen({ tv, onReconfigure }: Props) {
               <MaterialIcons
                 name="skip-next"
                 size={24}
-                color={pressed ? palette.accent : palette.textPrimary}
+                color={pressed ? colors.accent : colors.textPrimary}
               />
             )}
           </Key>
@@ -321,7 +466,7 @@ export function RemoteScreen({ tv, onReconfigure }: Props) {
               <MaterialIcons
                 name="dialpad"
                 size={21}
-                color={pressed ? palette.accent : palette.textMuted}
+                color={pressed ? colors.accent : colors.textMuted}
               />
               <Text style={[styles.numpadText, pressed && styles.numpadTextPressed]}>Numpad</Text>
             </>
@@ -329,7 +474,7 @@ export function RemoteScreen({ tv, onReconfigure }: Props) {
         </Pressable>
 
         <View style={styles.footer}>
-          <Text style={styles.status}>{status}</Text>
+          <Text style={styles.status}>{footerStatus}</Text>
           <Pressable
             onPress={onReconfigure}
             style={({ pressed }) => [styles.reconfigure, pressed && styles.reconfigurePressed]}
@@ -339,7 +484,7 @@ export function RemoteScreen({ tv, onReconfigure }: Props) {
                 <MaterialIcons
                   name="tv"
                   size={16}
-                  color={pressed ? "#5BD4FF" : palette.accent}
+                  color={pressed ? "#5BD4FF" : colors.accent}
                 />
                 <Text style={styles.reconfigureText}>Switch TV</Text>
               </>
@@ -362,7 +507,7 @@ export function RemoteScreen({ tv, onReconfigure }: Props) {
                 style={({ pressed }) => [styles.closeButton, pressed && styles.modalButtonPressed]}
                 onPress={closeNumpad}
               >
-                <MaterialIcons name="close" size={18} color={palette.textPrimary} />
+                <MaterialIcons name="close" size={18} color={colors.textPrimary} />
               </Pressable>
             </View>
 
@@ -394,7 +539,7 @@ export function RemoteScreen({ tv, onReconfigure }: Props) {
                 onPress={pressBackspace}
                 style={({ pressed }) => [styles.numpadKey, pressed && styles.numpadKeyPressed]}
               >
-                <MaterialIcons name="backspace" size={20} color={palette.textPrimary} />
+                <MaterialIcons name="backspace" size={20} color={colors.textPrimary} />
               </Pressable>
               <Pressable
                 onPress={() => pressDigit("0")}
@@ -416,6 +561,113 @@ export function RemoteScreen({ tv, onReconfigure }: Props) {
           </Pressable>
         </Pressable>
       </Modal>
+
+      <Modal
+        visible={isVizioPairingOpen}
+        transparent
+        animationType="fade"
+        onRequestClose={closeVizioPairing}
+      >
+        <Pressable style={styles.modalBackdrop} onPress={closeVizioPairing}>
+          <Pressable style={styles.vizioPairSheet} onPress={() => undefined}>
+            <View style={styles.numpadHeader}>
+              <Text style={styles.numpadTitle}>Vizio Pairing</Text>
+              <Pressable
+                style={({ pressed }) => [styles.closeButton, pressed && styles.modalButtonPressed]}
+                onPress={closeVizioPairing}
+                disabled={isSubmittingVizioPin}
+              >
+                <MaterialIcons name="close" size={18} color={colors.textPrimary} />
+              </Pressable>
+            </View>
+
+            <Text style={styles.vizioPairHint}>
+              Enter the PIN shown on your Vizio TV to authorize this remote.
+            </Text>
+
+            <TextInput
+              value={vizioPin}
+              onChangeText={(value) => setVizioPin(value.replace(/[^\d]/g, "").slice(0, 8))}
+              placeholder="PIN Code"
+              placeholderTextColor={colors.textMuted}
+              keyboardType="number-pad"
+              style={styles.vizioPinInput}
+              editable={!isSubmittingVizioPin}
+              autoFocus
+            />
+
+            <Pressable
+              onPress={() => {
+                void submitVizioPin();
+              }}
+              disabled={isSubmittingVizioPin}
+              style={({ pressed }) => [
+                styles.vizioSubmitButton,
+                pressed && styles.vizioSubmitPressed,
+                isSubmittingVizioPin && styles.vizioSubmitDisabled,
+              ]}
+            >
+              <Text style={styles.vizioSubmitText}>
+                {isSubmittingVizioPin ? "Pairing..." : "Submit PIN"}
+              </Text>
+            </Pressable>
+          </Pressable>
+        </Pressable>
+      </Modal>
+
+      <Modal
+        visible={isSonyPairingOpen}
+        transparent
+        animationType="fade"
+        onRequestClose={closeSonyPairing}
+      >
+        <Pressable style={styles.modalBackdrop} onPress={closeSonyPairing}>
+          <Pressable style={styles.sonyPairSheet} onPress={() => undefined}>
+            <View style={styles.numpadHeader}>
+              <Text style={styles.numpadTitle}>Sony Pairing</Text>
+              <Pressable
+                style={({ pressed }) => [styles.closeButton, pressed && styles.modalButtonPressed]}
+                onPress={closeSonyPairing}
+                disabled={isSubmittingSonyPsk}
+              >
+                <MaterialIcons name="close" size={18} color={colors.textPrimary} />
+              </Pressable>
+            </View>
+
+            <Text style={styles.sonyPairHint}>
+              Enter your Sony TV Pre-Shared Key from Network/IP Control settings.
+            </Text>
+
+            <TextInput
+              value={sonyPsk}
+              onChangeText={setSonyPsk}
+              placeholder="Pre-Shared Key"
+              placeholderTextColor={colors.textMuted}
+              style={styles.sonyPskInput}
+              editable={!isSubmittingSonyPsk}
+              autoCapitalize="none"
+              autoCorrect={false}
+              autoFocus
+            />
+
+            <Pressable
+              onPress={() => {
+                void submitSonyPsk();
+              }}
+              disabled={isSubmittingSonyPsk}
+              style={({ pressed }) => [
+                styles.sonySubmitButton,
+                pressed && styles.sonySubmitPressed,
+                isSubmittingSonyPsk && styles.sonySubmitDisabled,
+              ]}
+            >
+              <Text style={styles.sonySubmitText}>
+                {isSubmittingSonyPsk ? "Pairing..." : "Save Key"}
+              </Text>
+            </Pressable>
+          </Pressable>
+        </Pressable>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -426,10 +678,11 @@ const keyBase = {
   borderRadius: 18,
 };
 
-const styles = StyleSheet.create({
+const createStyles = (colors: typeof palette) =>
+  StyleSheet.create({
   safe: {
     flex: 1,
-    backgroundColor: palette.backgroundA,
+    backgroundColor: colors.backgroundA,
   },
   bgOrbA: {
     position: "absolute",
@@ -460,9 +713,9 @@ const styles = StyleSheet.create({
   },
   key: {
     ...keyBase,
-    backgroundColor: palette.panelStrong,
+    backgroundColor: colors.panelStrong,
     borderWidth: 1,
-    borderColor: palette.border,
+    borderColor: colors.border,
     alignItems: "center",
     justifyContent: "center",
   },
@@ -470,9 +723,9 @@ const styles = StyleSheet.create({
     borderRadius: 999,
   },
   keyActive: {
-    backgroundColor: "#12334A",
+    backgroundColor: colors.accentSoft,
     borderColor: "rgba(18, 181, 255, 0.36)",
-    shadowColor: palette.accent,
+    shadowColor: colors.accent,
     shadowOpacity: 0.24,
     shadowRadius: 10,
     shadowOffset: { width: 0, height: 4 },
@@ -480,7 +733,7 @@ const styles = StyleSheet.create({
   },
   keyPressed: {
     transform: [{ scale: 0.95 }],
-    backgroundColor: "#1D2C46",
+    backgroundColor: colors.panel,
     borderColor: "rgba(18, 181, 255, 0.35)",
   },
   dpadWrap: {
@@ -491,9 +744,9 @@ const styles = StyleSheet.create({
     width: 232,
     height: 232,
     borderRadius: 999,
-    backgroundColor: "rgba(23, 34, 56, 0.65)",
+    backgroundColor: colors.panelSoft,
     borderWidth: 1,
-    borderColor: palette.border,
+    borderColor: colors.border,
     alignItems: "center",
     justifyContent: "center",
   },
@@ -525,24 +778,24 @@ const styles = StyleSheet.create({
     width: 84,
     height: 84,
     borderRadius: 999,
-    backgroundColor: palette.panelStrong,
+    backgroundColor: colors.panelStrong,
     borderWidth: 1,
-    borderColor: palette.border,
+    borderColor: colors.border,
     alignItems: "center",
     justifyContent: "center",
   },
   okPressed: {
-    backgroundColor: "#1D2C46",
+    backgroundColor: colors.panel,
     borderColor: "rgba(18, 181, 255, 0.35)",
     transform: [{ scale: 0.95 }],
   },
   okText: {
     fontFamily: fonts.heading,
-    color: palette.textPrimary,
+    color: colors.textPrimary,
     fontSize: 25,
   },
   okTextPressed: {
-    color: palette.accent,
+    color: colors.accent,
   },
   middleRow: {
     marginTop: 12,
@@ -568,36 +821,36 @@ const styles = StyleSheet.create({
   rockerTop: {
     width: 72,
     height: 48,
-    backgroundColor: palette.panelStrong,
+    backgroundColor: colors.panelStrong,
     borderTopLeftRadius: 16,
     borderTopRightRadius: 16,
     borderWidth: 1,
-    borderColor: palette.border,
+    borderColor: colors.border,
     justifyContent: "center",
     alignItems: "center",
   },
   rockerBottom: {
     width: 72,
     height: 48,
-    backgroundColor: palette.panelStrong,
+    backgroundColor: colors.panelStrong,
     borderBottomLeftRadius: 16,
     borderBottomRightRadius: 16,
     borderWidth: 1,
-    borderColor: palette.border,
+    borderColor: colors.border,
     justifyContent: "center",
     alignItems: "center",
   },
   segmentPressed: {
-    backgroundColor: "#1D2C46",
+    backgroundColor: colors.panel,
     borderColor: "rgba(18, 181, 255, 0.35)",
   },
   rockerSign: {
-    color: palette.textPrimary,
+    color: colors.textPrimary,
     fontFamily: fonts.heading,
     fontSize: 26,
   },
   rockerLabel: {
-    color: palette.textMuted,
+    color: colors.textMuted,
     fontFamily: fonts.heading,
     fontSize: 13,
     letterSpacing: 1.1,
@@ -615,26 +868,26 @@ const styles = StyleSheet.create({
     minWidth: 166,
     paddingHorizontal: 17,
     borderRadius: 17,
-    backgroundColor: palette.panelStrong,
+    backgroundColor: colors.panelStrong,
     borderWidth: 1,
-    borderColor: palette.border,
+    borderColor: colors.border,
     flexDirection: "row",
     gap: 9,
     alignItems: "center",
     justifyContent: "center",
   },
   numpadPressed: {
-    backgroundColor: "#1D2C46",
+    backgroundColor: colors.panel,
     borderColor: "rgba(18, 181, 255, 0.35)",
     transform: [{ scale: 0.97 }],
   },
   numpadText: {
     fontFamily: fonts.heading,
-    color: palette.textMuted,
+    color: colors.textMuted,
     fontSize: 22,
   },
   numpadTextPressed: {
-    color: palette.accent,
+    color: colors.accent,
   },
   footer: {
     marginTop: "auto",
@@ -643,7 +896,7 @@ const styles = StyleSheet.create({
     paddingTop: 10,
   },
   status: {
-    color: palette.textMuted,
+    color: colors.textMuted,
     fontFamily: fonts.body,
     fontSize: 12,
   },
@@ -659,7 +912,7 @@ const styles = StyleSheet.create({
     backgroundColor: "rgba(18, 181, 255, 0.12)",
   },
   reconfigureText: {
-    color: palette.accent,
+    color: colors.accent,
     fontFamily: fonts.heading,
     fontSize: 13,
   },
@@ -672,11 +925,33 @@ const styles = StyleSheet.create({
     borderTopLeftRadius: 24,
     borderTopRightRadius: 24,
     borderWidth: 1,
-    borderColor: palette.border,
-    backgroundColor: "#0D1628",
+    borderColor: colors.border,
+    backgroundColor: colors.backgroundB,
     paddingHorizontal: 20,
     paddingTop: 14,
     paddingBottom: 24,
+    gap: 10,
+  },
+  vizioPairSheet: {
+    marginHorizontal: 18,
+    marginBottom: 36,
+    borderRadius: 18,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.backgroundB,
+    paddingHorizontal: 16,
+    paddingVertical: 14,
+    gap: 10,
+  },
+  sonyPairSheet: {
+    marginHorizontal: 18,
+    marginBottom: 36,
+    borderRadius: 18,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.backgroundB,
+    paddingHorizontal: 16,
+    paddingVertical: 14,
     gap: 10,
   },
   numpadHeader: {
@@ -685,35 +960,113 @@ const styles = StyleSheet.create({
     justifyContent: "space-between",
   },
   numpadTitle: {
-    color: palette.textPrimary,
+    color: colors.textPrimary,
     fontFamily: fonts.heading,
     fontSize: 18,
+  },
+  vizioPairHint: {
+    color: colors.textMuted,
+    fontFamily: fonts.body,
+    fontSize: 13,
+    lineHeight: 18,
+  },
+  sonyPairHint: {
+    color: colors.textMuted,
+    fontFamily: fonts.body,
+    fontSize: 13,
+    lineHeight: 18,
+  },
+  vizioPinInput: {
+    height: 46,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.panelSoft,
+    color: colors.textPrimary,
+    fontFamily: fonts.heading,
+    fontSize: 20,
+    letterSpacing: 2,
+    textAlign: "center",
+    paddingHorizontal: 12,
+  },
+  vizioSubmitButton: {
+    height: 44,
+    borderRadius: 12,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: colors.accent,
+    borderWidth: 1,
+    borderColor: "rgba(18, 181, 255, 0.45)",
+  },
+  vizioSubmitPressed: {
+    backgroundColor: colors.accent,
+    transform: [{ scale: 0.98 }],
+  },
+  vizioSubmitDisabled: {
+    opacity: 0.8,
+  },
+  vizioSubmitText: {
+    color: "#04111a",
+    fontFamily: fonts.heading,
+    fontSize: 16,
+  },
+  sonyPskInput: {
+    height: 46,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.panelSoft,
+    color: colors.textPrimary,
+    fontFamily: fonts.body,
+    fontSize: 16,
+    paddingHorizontal: 12,
+  },
+  sonySubmitButton: {
+    height: 44,
+    borderRadius: 12,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: colors.accent,
+    borderWidth: 1,
+    borderColor: "rgba(18, 181, 255, 0.45)",
+  },
+  sonySubmitPressed: {
+    backgroundColor: colors.accent,
+    transform: [{ scale: 0.98 }],
+  },
+  sonySubmitDisabled: {
+    opacity: 0.8,
+  },
+  sonySubmitText: {
+    color: "#04111a",
+    fontFamily: fonts.heading,
+    fontSize: 16,
   },
   closeButton: {
     width: 34,
     height: 34,
     borderRadius: 10,
     borderWidth: 1,
-    borderColor: palette.border,
+    borderColor: colors.border,
     alignItems: "center",
     justifyContent: "center",
-    backgroundColor: palette.panelStrong,
+    backgroundColor: colors.panelStrong,
   },
   modalButtonPressed: {
-    backgroundColor: "#1D2C46",
+    backgroundColor: colors.panel,
   },
   channelDisplay: {
     height: 58,
     borderRadius: 14,
     borderWidth: 1,
-    borderColor: palette.border,
-    backgroundColor: "#111D31",
+    borderColor: colors.border,
+    backgroundColor: colors.panelSoft,
     alignItems: "center",
     justifyContent: "center",
     marginBottom: 2,
   },
   channelDisplayText: {
-    color: palette.textPrimary,
+    color: colors.textPrimary,
     fontFamily: fonts.heading,
     fontSize: 28,
     letterSpacing: 5,
@@ -728,27 +1081,27 @@ const styles = StyleSheet.create({
     height: 56,
     borderRadius: 16,
     borderWidth: 1,
-    borderColor: palette.border,
-    backgroundColor: palette.panelStrong,
+    borderColor: colors.border,
+    backgroundColor: colors.panelStrong,
     alignItems: "center",
     justifyContent: "center",
   },
   numpadKeyPressed: {
-    backgroundColor: "#1D2C46",
+    backgroundColor: colors.panel,
     borderColor: "rgba(18, 181, 255, 0.35)",
     transform: [{ scale: 0.97 }],
   },
   numpadKeyAccent: {
     borderColor: "rgba(18, 181, 255, 0.45)",
-    backgroundColor: palette.accent,
+    backgroundColor: colors.accent,
   },
   numpadKeyAccentPressed: {
-    backgroundColor: "#42CFFF",
+    backgroundColor: colors.accent,
     transform: [{ scale: 0.97 }],
   },
   numpadKeyText: {
-    color: palette.textPrimary,
+    color: colors.textPrimary,
     fontFamily: fonts.heading,
     fontSize: 24,
   },
-});
+  });

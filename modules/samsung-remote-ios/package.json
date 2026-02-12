@@ -1,0 +1,11 @@
+{
+  "name": "samsung-remote-ios",
+  "version": "1.0.0",
+  "description": "Local Expo module for Samsung iOS secure WebSocket control.",
+  "main": "index.ts",
+  "types": "index.ts",
+  "private": true,
+  "peerDependencies": {
+    "expo": "*"
+  }
+}

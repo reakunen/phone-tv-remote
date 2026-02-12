@@ -12,7 +12,8 @@
         "NSAppTransportSecurity": {
           "NSAllowsLocalNetworking": true
         }
-      }
+      },
+      "bundleIdentifier": "com.dormme.tv-remote"
     },
     "web": {
       "bundler": "metro"
